@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frameforge"
+version = "0.2.0rc1"
+requires-python = ">=3.12,<3.13"
+description = "Local video preparation and montage workspace"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+include = ["imagegen*"]
+
+[tool.setuptools.package-data]
+imagegen = ["static/*", "static/presets/*"]

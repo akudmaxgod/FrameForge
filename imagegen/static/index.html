@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FrameForge</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/overrides.css">
+  <link rel="stylesheet" href="/voice-workflow.css">
+  <link rel="stylesheet" href="/mode-camera.css?v=2">
+  <link rel="stylesheet" href="/style-gallery.css?v=20261031_v1">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">F</span><span>Frame<span>Forge</span></span></div>
+    <nav class="steps" aria-label="Этапы проекта">
+      <button type="button" class="step active" data-view="studio"><b>1</b> Подготовка</button>
+      <button type="button" class="step" data-view="queue" style="display:none;"><b>2</b> Генерация</button>
+      <button type="button" class="step" data-view="export"><b>2</b> Монтаж</button>
+    </nav>
+    <div class="project-tools">
+      <select id="project-select" aria-label="Открыть проект"></select>
+      <button id="import-prompts-button" class="icon-button" type="button" data-testid="import-prompts-header" title="Создать проект из готовых промптов TXT или JSON">↑ Загрузить промпты</button>
+      <button id="new-button" class="icon-button" type="button">＋ Новый</button>
+      <button id="projects-button" class="icon-button" type="button">▦ Проекты</button>
+      <button id="channels-button" class="icon-button" type="button" aria-label="Каналы и стили" data-testid="channels-button" style="display:none;">🎨 Каналы и стили</button>
+      <button id="settings-button" class="icon-button" type="button" aria-label="Настройки">⚙</button>
+    </div>
+  </header>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <div class="app-shell">
+    <aside id="controls" class="control-panel"></aside>
+    <main id="main"></main>
+  </div>
+  <dialog id="editor">
+    <form method="dialog"><button class="close">Закрыть</button></form>
+    <div id="editor-body"></div>
+  </dialog>
+  <script type="module" src="/app.js?v=flexfix_20261102_093642"></script>
+  <link rel="stylesheet" href="/montage.css?v=flexfix_20261102_093642">
+  <link rel="stylesheet" href="/montage-lanes.css?v=20261030_v7">
+</body>
+</html>

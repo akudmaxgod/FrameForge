@@ -1,0 +1,187 @@
+{
+  "description": "Exact locally tested component bytes; not included in application ZIP. Obtain upstream terms before redistribution.",
+  "upstream_runtime": "https://github.com/ggml-org/llama.cpp/releases",
+  "upstream_model": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF",
+  "files": [
+    {
+      "path": "backends/llama-cuda/cublas64_12.dll",
+      "size": 100033536,
+      "sha256": "e40202fe4223c1cd2d2dce7beec59e1ed61c7801bd827309183be9b50e358f4c"
+    },
+    {
+      "path": "backends/llama-cuda/cublasLt64_12.dll",
+      "size": 473551360,
+      "sha256": "2a896460bef60ed57ef32b0875812f355a6984e671d638bb632f5e8c1d7a831f"
+    },
+    {
+      "path": "backends/llama-cuda/cudart64_12.dll",
+      "size": 553984,
+      "sha256": "d28e42265da7462162a54da6b7a99ea4fa2caf8139d862bb500db875d0b32dfc"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-base.dll",
+      "size": 800768,
+      "sha256": "1b3fc556d0ed594ae280e53e36c274d42de40e4034a6a4df432464898ed5832a"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-alderlake.dll",
+      "size": 1424384,
+      "sha256": "b41d44e8570bb8a82feca15bbe78af62a6e39f769f9ec7bed3c06b2c61e45b89"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-cannonlake.dll",
+      "size": 1649664,
+      "sha256": "771eb01dfb3e7565a1d442a2e6c2a81ff6c2c58b23d4a1284e53e5d857633231"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-cascadelake.dll",
+      "size": 1634304,
+      "sha256": "e98b48b113e6303cdd4a19a5d993234089f5fd45bf36d38047d1f7bb35799aca"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-cooperlake.dll",
+      "size": 1634816,
+      "sha256": "ba7c81378f495c243e1aa7f3ee00b314e5ef20f0165ff14c8c93a586c8b13efc"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-haswell.dll",
+      "size": 1428992,
+      "sha256": "9d83e0d5629ac49d2c348ce12b0966236163938df4203f2db1972c71ddff0d5f"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-icelake.dll",
+      "size": 1640448,
+      "sha256": "277cf83c7f630e11bcd8afff57f2c12c6a908a40b6411c061b738f364a36d4b2"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-ivybridge.dll",
+      "size": 1298944,
+      "sha256": "d901d9a5c0bfb6b33f4ee47b2456d38a086247234620fadc9c860051a99b8a21"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-piledriver.dll",
+      "size": 1303040,
+      "sha256": "1c8e5e6bc1b74b35157e14556d3a1b82aa301054210e763a495ea96bde8d956a"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-sandybridge.dll",
+      "size": 1278976,
+      "sha256": "030c6fb7547fbbd33a402e4c81322125c8889f0df714d53c7c10de2659c4aae5"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-sapphirerapids.dll",
+      "size": 1911296,
+      "sha256": "c47e41ef170cf02ad42a676fb761afbfb7e901aa1544c68b64f37ba6de41c3b7"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-skylakex.dll",
+      "size": 1643008,
+      "sha256": "c881bbbd90a392d83275172380e9b587f55c1ca35f6924bc9f6a75838ae44a73"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-sse42.dll",
+      "size": 909312,
+      "sha256": "d29ce83db613f5883ef87916b639f669438e40aeae723a6fcd852b9996b85bb5"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-x64.dll",
+      "size": 901632,
+      "sha256": "6bd6831b238cb37d46fc03c65d30aa6084a6c7fcce74ce2680fd5a3b53fcf9ed"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cpu-zen4.dll",
+      "size": 1641472,
+      "sha256": "ea91db816a177f4c4bbef811a785cf217a20f85e0f46c8085b250603bd9ceaf2"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-cuda.dll",
+      "size": 569357824,
+      "sha256": "8333bbf070ed88a92428bfc595639d7b2479a22e3056e0646afa869779e285ae"
+    },
+    {
+      "path": "backends/llama-cuda/ggml-rpc.dll",
+      "size": 168448,
+      "sha256": "bf1a9b0093bed4d8f9121e2f8a837ef982d07bfb6529d4e6aea34cf60000b6ab"
+    },
+    {
+      "path": "backends/llama-cuda/ggml.dll",
+      "size": 79872,
+      "sha256": "cda59b0b549ad01182e0f433f681a8e15baa97bd3d47c345675e30bb8785650a"
+    },
+    {
+      "path": "backends/llama-cuda/libomp.dll",
+      "size": 768000,
+      "sha256": "a12116ba72d1d6820407cf30be23da04ce79d6bb8a71a5ee71759c5a1faa6f1c"
+    },
+    {
+      "path": "backends/llama-cuda/llama-batched-bench-impl.dll",
+      "size": 63488,
+      "sha256": "590cd0ecf66d911e54bfb918e9803077d6ea46adcd0f056fa0cd220789b82871"
+    },
+    {
+      "path": "backends/llama-cuda/llama-bench-impl.dll",
+      "size": 401408,
+      "sha256": "f90eed3b75e71881b26f58b7c0ba0f0b8432d435a9d0fbade37b3bff604c0c2b"
+    },
+    {
+      "path": "backends/llama-cuda/llama-cli-impl.dll",
+      "size": 3297792,
+      "sha256": "0fc1137eb6399d03d3d666d82b8f14a01b66b734cf3fe7b262e0de1dd1b4b15a"
+    },
+    {
+      "path": "backends/llama-cuda/llama-common.dll",
+      "size": 7849472,
+      "sha256": "379fa081b07e87e88e490f83b206e4368973141ae7efbf04974f86a9e00a00fb"
+    },
+    {
+      "path": "backends/llama-cuda/llama-completion-impl.dll",
+      "size": 135168,
+      "sha256": "dd9a16ef1ed5a9b84610e0cf1cb1c54eab99e8e2e74d56c78f6aeb34d2ee0775"
+    },
+    {
+      "path": "backends/llama-cuda/llama-fit-params-impl.dll",
+      "size": 43008,
+      "sha256": "d1c2fd5df70c58ab0e24ccc4df541cba5cbcff26ff75af537f7200742677fdbd"
+    },
+    {
+      "path": "backends/llama-cuda/llama-perplexity-impl.dll",
+      "size": 196096,
+      "sha256": "2ab2cecb9e21277582a993628881a7637b21c3ba6f2fc003ad28ee2e1f8ba60e"
+    },
+    {
+      "path": "backends/llama-cuda/llama-quantize-impl.dll",
+      "size": 137216,
+      "sha256": "14cf75aecb597acc3db99849c2d07b7fcf0f51e3640ddd9746a5016633ea5dd6"
+    },
+    {
+      "path": "backends/llama-cuda/llama-server-impl.dll",
+      "size": 8922624,
+      "sha256": "3704863e78a3b3a8ef068057e412913097db7848a2dbb8f082de907d4a42a2de"
+    },
+    {
+      "path": "backends/llama-cuda/llama-server.exe",
+      "size": 9216,
+      "sha256": "a4b4d3659cbf124ccc5d7b54cb3119e2ed8e423928a1e9d99469950d4959cd44"
+    },
+    {
+      "path": "backends/llama-cuda/llama.dll",
+      "size": 3203072,
+      "sha256": "fe570757d43e7d923af7239a33e01b07012fa06d4fa0a963699256b06ec2f5f9"
+    },
+    {
+      "path": "backends/llama-cuda/mtmd.dll",
+      "size": 1787904,
+      "sha256": "251a2ce4867ec0893727fa9688b5eb70cd06e7d18b460ff733131e30784db15c"
+    },
+    {
+      "path": "backends/models/qwen3-vl/mmproj-Qwen3VL-4B-Instruct-F16.gguf",
+      "size": 836180256,
+      "sha256": "256f3a43bd4205ffef48d6b92715e1e70b5b0e9aef06522584967513a9985331"
+    },
+    {
+      "path": "backends/models/qwen3-vl/Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+      "size": 2497281664,
+      "sha256": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a"
+    }
+  ]
+}

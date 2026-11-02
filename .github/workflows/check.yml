@@ -1,0 +1,23 @@
+name: Release checks
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pip check
+      - run: python -m compileall -q imagegen
+      - run: python -m unittest discover -s tests -v
+      - run: node --check imagegen/static/app.js
+      - run: node --check imagegen/static/frameforge-flow-v1.user.js
+      - run: python scripts/package_release.py

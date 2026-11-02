@@ -1,0 +1,3 @@
+# Optional InsightFace runtime; model licensing is separate.
+insightface==2.0
+onnxruntime==1.30.0

@@ -1,0 +1,330 @@
+[
+  {
+    "name": "annotated-types",
+    "version": "0.8.0",
+    "license_expression": "MIT",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/annotated-types/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "anyio",
+    "version": "4.15.1",
+    "license_expression": "MIT",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/anyio/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "av",
+    "version": "18.1.0",
+    "license_expression": "BSD-3-Clause",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/av/licenses/AUTHORS.py",
+      "docs/third-party/av/licenses/AUTHORS.rst",
+      "docs/third-party/av/licenses/LICENSE.txt",
+      "docs/third-party/av/licenses/__pycache__/AUTHORS.cpython-312.pyc"
+    ]
+  },
+  {
+    "name": "dawg2-python",
+    "version": "0.9.0",
+    "license_expression": null,
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/dawg2-python/LICENSE"
+    ]
+  },
+  {
+    "name": "dawg-python",
+    "version": "0.7.2",
+    "license_expression": null,
+    "homepage": "https://github.com/kmike/DAWG-Python/",
+    "license_files": []
+  },
+  {
+    "name": "docopt",
+    "version": "0.6.2",
+    "license_expression": null,
+    "homepage": "http://docopt.org",
+    "license_files": [
+      "docs/third-party/docopt/licenses/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "h11",
+    "version": "0.16.0",
+    "license_expression": null,
+    "homepage": "https://github.com/python-hyper/h11",
+    "license_files": [
+      "docs/third-party/h11/licenses/LICENSE.txt"
+    ]
+  },
+  {
+    "name": "httpcore2",
+    "version": "2.16.0",
+    "license_expression": "BSD-3-Clause",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/httpcore2/licenses/LICENSE.md"
+    ]
+  },
+  {
+    "name": "httpx2",
+    "version": "2.16.0",
+    "license_expression": "BSD-3-Clause",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/httpx2/licenses/LICENSE.md"
+    ]
+  },
+  {
+    "name": "idna",
+    "version": "3.20",
+    "license_expression": "BSD-3-Clause",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/idna/licenses/LICENSE.md"
+    ]
+  },
+  {
+    "name": "intervaltree",
+    "version": "3.2.1",
+    "license_expression": "Apache-2.0",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/intervaltree/licenses/LICENSE.txt"
+    ]
+  },
+  {
+    "name": "ipymarkup",
+    "version": "0.9.0",
+    "license_expression": null,
+    "homepage": "https://github.com/natasha/ipymarkup",
+    "license_files": [
+      "docs/third-party/ipymarkup/LICENSE"
+    ]
+  },
+  {
+    "name": "jiter",
+    "version": "0.18.0",
+    "license_expression": "MIT",
+    "homepage": "https://github.com/pydantic/jiter/",
+    "license_files": [
+      "docs/third-party/jiter/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "natasha",
+    "version": "1.6.0",
+    "license_expression": null,
+    "homepage": "https://github.com/natasha/natasha",
+    "license_files": [
+      "docs/third-party/natasha/LICENSE"
+    ]
+  },
+  {
+    "name": "navec",
+    "version": "0.10.0",
+    "license_expression": null,
+    "homepage": "https://github.com/natasha/navec",
+    "license_files": [
+      "docs/third-party/navec/LICENSE"
+    ]
+  },
+  {
+    "name": "numpy",
+    "version": "2.3.5",
+    "license_expression": null,
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/numpy/LICENSE.txt"
+    ]
+  },
+  {
+    "name": "openai",
+    "version": "3.41.0",
+    "license_expression": "Apache-2.0",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/openai/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "opencv-python",
+    "version": "5.0.0.93",
+    "license_expression": null,
+    "homepage": "https://github.com/opencv/opencv-python",
+    "license_files": [
+      "docs/third-party/opencv-python/LICENSE-3RD-PARTY.txt",
+      "docs/third-party/opencv-python/LICENSE.txt"
+    ]
+  },
+  {
+    "name": "pillow",
+    "version": "12.3.0",
+    "license_expression": "MIT-CMU",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/pillow/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "pydantic",
+    "version": "2.14.1",
+    "license_expression": "MIT",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/pydantic/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "pydantic-core",
+    "version": "2.50.1",
+    "license_expression": "MIT",
+    "homepage": "https://github.com/pydantic/pydantic",
+    "license_files": [
+      "docs/third-party/pydantic-core/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "pymorphy2",
+    "version": "0.9.1",
+    "license_expression": null,
+    "homepage": "https://github.com/kmike/pymorphy2/",
+    "license_files": []
+  },
+  {
+    "name": "pymorphy2-dicts-ru",
+    "version": "2.4.417127.4579844",
+    "license_expression": null,
+    "homepage": "https://github.com/kmike/pymorphy2-dicts/",
+    "license_files": []
+  },
+  {
+    "name": "pymorphy3",
+    "version": "2.0.6",
+    "license_expression": null,
+    "homepage": "https://github.com/no-plagiarism/pymorphy3",
+    "license_files": [
+      "docs/third-party/pymorphy3/licenses/AUTHORS.rst",
+      "docs/third-party/pymorphy3/licenses/LICENSE.txt"
+    ]
+  },
+  {
+    "name": "pymorphy3-dicts-ru",
+    "version": "2.4.417150.4580142",
+    "license_expression": null,
+    "homepage": "https://github.com/no-plagiarism/pymorphy3-dicts",
+    "license_files": []
+  },
+  {
+    "name": "python-dotenv",
+    "version": "1.2.4",
+    "license_expression": null,
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/python-dotenv/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "razdel",
+    "version": "0.5.0",
+    "license_expression": null,
+    "homepage": "https://github.com/natasha/razdel",
+    "license_files": [
+      "docs/third-party/razdel/LICENSE"
+    ]
+  },
+  {
+    "name": "setuptools",
+    "version": "84.1.0",
+    "license_expression": "MIT",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/LICENSE",
+      "docs/third-party/setuptools/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE.APACHE",
+      "docs/third-party/setuptools/licenses/LICENSE.BSD",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE",
+      "docs/third-party/setuptools/licenses/LICENSE.txt",
+      "docs/third-party/setuptools/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "slovnet",
+    "version": "0.6.0",
+    "license_expression": null,
+    "homepage": "https://github.com/natasha/slovnet",
+    "license_files": [
+      "docs/third-party/slovnet/LICENSE"
+    ]
+  },
+  {
+    "name": "sniffio",
+    "version": "1.3.1",
+    "license_expression": null,
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/sniffio/LICENSE",
+      "docs/third-party/sniffio/LICENSE.APACHE2",
+      "docs/third-party/sniffio/LICENSE.MIT"
+    ]
+  },
+  {
+    "name": "sortedcontainers",
+    "version": "2.4.0",
+    "license_expression": null,
+    "homepage": "http://www.grantjenks.com/docs/sortedcontainers/",
+    "license_files": [
+      "docs/third-party/sortedcontainers/LICENSE"
+    ]
+  },
+  {
+    "name": "truststore",
+    "version": "0.10.5",
+    "license_expression": "MIT",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/truststore/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "typing-extensions",
+    "version": "4.16.0",
+    "license_expression": "PSF-2.0",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/typing-extensions/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "typing-inspection",
+    "version": "0.4.4",
+    "license_expression": "MIT",
+    "homepage": null,
+    "license_files": [
+      "docs/third-party/typing-inspection/licenses/LICENSE"
+    ]
+  },
+  {
+    "name": "yargy",
+    "version": "0.16.0",
+    "license_expression": null,
+    "homepage": "https://github.com/natasha/yargy",
+    "license_files": [
+      "docs/third-party/yargy/LICENSE"
+    ]
+  }
+]
