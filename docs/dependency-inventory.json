@@ -25,8 +25,7 @@
     "license_files": [
       "docs/third-party/av/licenses/AUTHORS.py",
       "docs/third-party/av/licenses/AUTHORS.rst",
-      "docs/third-party/av/licenses/LICENSE.txt",
-      "docs/third-party/av/licenses/__pycache__/AUTHORS.cpython-312.pyc"
+      "docs/third-party/av/licenses/LICENSE.txt"
     ]
   },
   {

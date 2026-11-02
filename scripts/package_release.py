@@ -44,7 +44,7 @@ def main():
         path=ROOT/name
         if not path.exists():continue
         selected.extend([p for p in path.rglob('*') if p.is_file()] if path.is_dir() else [path])
-    selected=[p for p in selected if '__pycache__' not in p.parts and '.pytest_cache' not in p.parts and '.bak' not in p.name]
+    selected=[p for p in selected if '__pycache__' not in p.parts and '.pytest_cache' not in p.parts and '.bak' not in p.name and p.suffix not in {'.pyc','.pyo'}]
     from audit_release import audit
     audit(ROOT,selected)
     source_manifest={'version':version,'algorithm':'sha256','files':{p.relative_to(ROOT).as_posix():hash_file(p) for p in sorted(selected)}}
