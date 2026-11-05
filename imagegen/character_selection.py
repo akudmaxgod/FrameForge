@@ -10,12 +10,15 @@ def _aliases(character):
 
 def resolve_links(scene, characters, *, names_only=False):
     """Resolve IDs before labels, rejecting ambiguous labels instead of guessing."""
-    identities, labels = {}, {}
+    from .entity_identity import labels as identity_labels
+    identities, labels, diagnostic_aliases = {}, {}, {}
     for index, character in enumerate(characters):
+        for token in _aliases(character):
+            diagnostic_aliases.setdefault(str(token).strip().casefold(),set()).add(index)
         for token in (character.get('id'), character.get('cast_id')):
             if token:
                 identities.setdefault(str(token), set()).add(index)
-        for token in (character.get('name'), character.get('canonical_name'), *_aliases(character)):
+        for token in identity_labels(character):
             if token:
                 labels.setdefault(str(token).strip().casefold(), set()).add(index)
     selected, issues = [], []
@@ -27,7 +30,8 @@ def resolve_links(scene, characters, *, names_only=False):
             if index not in selected:
                 selected.append(index)
         else:
-            issues.append({'code': 'ambiguous_character_link' if matches else 'unknown_character_link',
+            ambiguous=bool(matches) or len(diagnostic_aliases.get(str(token).strip().casefold(),set()))>1
+            issues.append({'code': 'ambiguous_character_link' if ambiguous else 'unknown_character_link',
                            'message': f'Неоднозначная или неизвестная ссылка на персонажа: {token}',
                            'details': {'token': str(token)}})
     result = dict(scene)

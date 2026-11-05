@@ -31,3 +31,11 @@ def is_marker_style(style):
 
 def marker_contract(people=True):
     return MARKER_GRAPHICS + (' ' + MARKER_FIGURES + ' ' + MEDICAL_STORY if people else ' Draw only the required setting and objects; no people or body parts.')
+
+
+GRITTY_PREFIX = "Gritty Graphic Novel"
+GRITTY_INK_STYLE = 'Gritty Graphic Novel: detailed 2D ink illustration, clean variable-weight dark contours, fine facial and architectural lines, hatching for fur/chainmail/stone; muted ochre, brown, olive, slate and dusty blue with sparse deep red. Flat local colors with subtle smooth volume gradients, soft form shadows and hard cast shadows; restrained matte highlights, paper grain, atmospheric depth.'
+GRITTY_FLOW_STYLE = GRITTY_INK_STYLE + ' Realistic 1:6-1:7 adult proportions, distinct expressive faces, natural hands and fabric drapery; preserve required age/body differences. Keep each named hero recognizable from their established screen identity or supplied reference, including individual facial structure, hairline, age and scars. Depict only story-required cast, action and setting. No photography, 3D, painterly brushwork, cel shading, glossy highlights, captions or speech balloons.'
+
+def is_gritty_style(style):
+    return str(style or "").strip().casefold().startswith(GRITTY_PREFIX.casefold())

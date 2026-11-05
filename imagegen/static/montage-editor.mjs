@@ -1,9 +1,10 @@
-import {overlayFootage,segmentDuration} from './montage-layers.mjs';
+import {overlayFootage,segmentDuration,setClipSpeed} from './montage-layers.mjs';
 import {normalize} from './montage-timeline.mjs';
 import {MontagePlayer} from './montage-player.mjs';
 import {MontageLanes,timelineExtent,timelineTime} from './montage-lanes.mjs';
 import {mountVoiceFit} from './montage-fit-controls.mjs';
 import {mountMediaLibraryButton} from './media-library-panel.mjs';
+import {mountMaterialSearchButton} from './material-search.mjs';
 const sessions=new Map();
 const loadingSessions=new Map();
 const copy=x=>structuredClone(x),key=id=>'frameforge-edit:'+id;
@@ -62,6 +63,14 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   preview.className='montage-preview';preview.append(stage,controls,seek);top.append(preview);root.append(top);
   const strip=node('div',undefined,'montage-strip'),pagination=node('div',undefined,'montage-toolbar'),audio=node('div',undefined,'montage-audio'),exports=node('section',undefined,'montage-exports');
   const timelineHost=node('div');root.append(timelineHost);
+  const splitter=node('div',undefined,'montage-preview-splitter');splitter.tabIndex=0;splitter.setAttribute('role','separator');splitter.setAttribute('aria-label','Высота предпросмотра');splitter.setAttribute('aria-orientation','horizontal');
+  splitter.title='Потяните вверх или вниз, чтобы изменить высоту предпросмотра';splitter.style.cssText='height:10px;min-height:10px;width:100%;position:relative;z-index:100;flex:none;cursor:row-resize;touch-action:none;background:linear-gradient(transparent 4px,#655087 4px,#655087 6px,transparent 6px);border-radius:5px;';root.insertBefore(splitter,timelineHost);
+  const heightKey='frameforge-preview-height';
+  const resizePreview=h=>{h=Math.max(200,Math.min(window.innerHeight-140,h));const body=preview.closest('.montage-editor-body');if(body){body.style.height=(h+20)+'px';body.style.minHeight='0';body.style.flex='0 0 auto';}preview.style.height=h+'px';preview.style.flex='none';splitter.setAttribute('aria-valuenow',String(Math.round(h)));try{localStorage.setItem(heightKey,String(h));}catch{}};
+  try{const saved=Number(localStorage.getItem(heightKey));if(saved>=200)resizePreview(saved);}catch{}
+  splitter.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();player.pause();splitter.setPointerCapture(e.pointerId);const y=e.clientY,h=preview.getBoundingClientRect().height;const move=ev=>resizePreview(h+ev.clientY-y);const stop=()=>{splitter.removeEventListener('pointermove',move);splitter.removeEventListener('pointerup',stop);splitter.removeEventListener('pointercancel',stop);if(splitter.hasPointerCapture(e.pointerId))splitter.releasePointerCapture(e.pointerId);};splitter.addEventListener('pointermove',move);splitter.addEventListener('pointerup',stop);splitter.addEventListener('pointercancel',stop);};
+  splitter.onkeydown=e=>{if(['ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();resizePreview(preview.getBoundingClientRect().height+(e.key==='ArrowUp'?-20:20));}};
+  splitter.ondblclick=()=>resizePreview(360);
   const inspectorPanel=disclosure('Настройки выбранного клипа',inspector,'montage-clip-settings');root.append(inspectorPanel);
   const audioPanel=disclosure('Озвучка и музыка',audio,'montage-audio-settings');
   const sceneList=node('details',undefined,'montage-scene-list');sceneList.append(node('summary','Список сцен'),pagination,strip);root.append(audioPanel,sceneList,exports);root.insertBefore(exports,inspectorPanel);
@@ -105,8 +114,15 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
       notice(`Удалена дорожка: ${label}. Отмена — Ctrl+Z.`);
     }
   };
-  const footageInput=node('input');footageInput.type='file';footageInput.accept='.mp4,.mov,.m4v,.mkv,.webm';footageInput.multiple=true;footageInput.hidden=true;
-  const addFootage=button('Добавить футажи',()=>footageInput.click());
+  async function addLibraryItem(item){
+    player.pause();
+    const target=selected;
+    const result=await api(`/projects/${id}/edit/media-library/${item.id}/clip`,{});
+    edit(doc=>{if(!overlayFootage(doc,target,result.clip)){doc.clips.push(result.clip);selected=result.clip.edit_clip_id;}selectedKind='video';selectedLayer='footage';});
+    await flush(s);notice('Материал добавлен вручную. Изменение можно отменить.');
+  }
+  const footageInput=node('input');footageInput.type='file';footageInput.accept='.png,.jpg,.jpeg,.webp,.bmp,.mp4,.mov,.m4v,.mkv,.webm';footageInput.multiple=true;footageInput.hidden=true;
+  const addFootage=button('Добавить фото / видео',()=>footageInput.click());
   footageInput.onchange=async()=>{
     const files=[...footageInput.files];if(!files.length)return;addFootage.disabled=true;player.pause();let imported=0;
     const firstTarget=s.doc.clips.findIndex(c=>c.edit_clip_id===selected);const overlayTargets=s.doc.clips.slice(Math.max(0,firstTarget)).filter(c=>c.source_kind!=='footage').map(c=>c.edit_clip_id);
@@ -116,10 +132,35 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
       const result=await api(`/projects/${id}/edit/video`,file);
       edit(doc=>{if(!overlayFootage(doc,overlayTargets[imported],result.clip)){const index=doc.clips.findIndex(c=>c.edit_clip_id===selected);doc.clips.splice(index<0?doc.clips.length:index+1,0,result.clip);selected=result.clip.edit_clip_id;}selectedKind='video';selectedLayer='footage';});imported++;
     }await flush(s);notice(`Добавлено футажей: ${imported}. Футаж наложен на выбранный исходный кадр; звук выключен.`);
-    }catch(e){notice(e.message,true);}finally{addFootage.disabled=false;addFootage.textContent='Добавить футажи';footageInput.value='';}
+    }catch(e){notice(e.message,true);}finally{addFootage.disabled=false;addFootage.textContent='Добавить фото / видео';footageInput.value='';}
   };
   toolbar.append(addFootage,footageInput);
-  mountMediaLibraryButton(toolbar, { projectId: id, api, notice, beforeOpen: async()=>{player.pause();await flush(s);} });
+  mountMediaLibraryButton(toolbar, { projectId: id, api, notice, onManualAdd:addLibraryItem, beforeOpen: async()=>{player.pause();await flush(s);} });
+  mountMaterialSearchButton(toolbar, {
+    projectId: id,
+    api,
+    notice,
+    beforeOpen: async () => { player.pause(); await flush(s); },
+    getSelectedClip: () => {
+      const clip = s.doc.clips.find(c => c.edit_clip_id === selected);
+      const scene = sceneMap.get(clip?.scene_id)?.data;
+      return {
+        clip_id: clip?.source_kind === 'footage' ? null : clip?.edit_clip_id,
+        expected_revision: s.revision,
+        quote: scene?.source_quote || '',
+        search_text: scene?.source_quote || scene?.beat || '',
+      };
+    },
+    onManualAdd: addLibraryItem,
+    onDocumentChanged: (newDoc, newRev, sources) => {
+      s.history.push(copy(s.doc));s.future=[];
+      if(sources)s.sources=sources;
+      s.doc = newDoc;
+      s.revision = newRev;
+      s.dirty = false;
+      render();
+    }
+  });
   toolbar.append(button('Добавить готовые сцены',()=>sync(true)),button('Обновить все источники',()=>sync(false)),button('Сохранить',()=>flush(s)),button('↶ Отменить',()=>undo()),button('↷ Повторить',()=>redo()),status);
   more.append(button('Перечитать с сервера',async()=>{if(s.dirty){try{localStorage.setItem(key(id)+':recovery',JSON.stringify(s.doc));}catch{}}const result=await api(`/projects/${id}/edit`);s.doc=result.document;s.revision=result.revision;s.sources=result.sources;s.lastExport=result.last_export_id;s.conflict=false;s.dirty=false;s.error='';s.history=[];s.future=[];localStorage.removeItem(key(id));render();showJob();notice('Монтаж перечитан. Предыдущий несохранённый черновик оставлен в резервной копии браузера.');}));
   more.append(button('Скачать черновик',()=>{const data=localStorage.getItem(key(id)+':recovery');const url=URL.createObjectURL(new Blob([s.dirty?JSON.stringify(s.doc,null,2):data||JSON.stringify(s.doc,null,2)],{type:'application/json'}));const link=node('a');link.href=url;link.download='frameforge-montage-draft.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}));
@@ -143,6 +184,7 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   const resizerRight=node('div',undefined,'montage-resizer montage-resizer-right');
   resizerRight.setAttribute('role','separator');resizerRight.setAttribute('aria-label','Изменить ширину правой панели');resizerRight.title='Потяните для изменения ширины (двойной клик — сброс)';
   editorBody.append(library,resizerLeft,top,resizerRight,inspectorPanel);root.insertBefore(editorBody,timelineHost);
+  root.insertBefore(splitter,timelineHost);if(preview.style.height)resizePreview(parseFloat(preview.style.height));
   const storageKeyLayout='frameforge-montage-panel-widths';
   let leftWidth=280,rightWidth=300;
   try{const saved=JSON.parse(localStorage.getItem(storageKeyLayout));if(saved&&typeof saved.left==='number')leftWidth=saved.left;if(saved&&typeof saved.right==='number')rightWidth=saved.right;}catch{}
@@ -233,7 +275,10 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
      field(inspector,'Начало в исходнике, с',c.trim_in_ms/1000,v=>{if(v*1000>=c.trim_out_ms)throw Error('Начало должно быть раньше конца.');set('trim_in_ms',v*1000);},{max:(c.trim_out_ms-1000/24)/1000,step:.01});
      field(inspector,'Конец в исходнике, с',c.trim_out_ms/1000,v=>{if(v*1000<=c.trim_in_ms)throw Error('Конец должен быть позже начала.');set('trim_out_ms',v*1000);},{min:(c.trim_in_ms+1000/24)/1000,max:c.source_duration_ms/1000,step:.01});
     }
-    if(c.playback_rate&&c.playback_rate!==1)inspector.append(node('p',`Скорость под озвучку: ${c.playback_rate.toFixed(3)}×. Голос воспроизводится в исходной скорости.`));
+    if(c.media_type!=='image'){
+      field(inspector,'Скорость клипа, ×',c.playback_rate??1,v=>edit(doc=>setClipSpeed(doc,base.edit_clip_id,c!==base,v)),{min:.05,max:4,step:.05});
+      inspector.append(node('p','Изменение скорости меняет длительность сегмента. Края на таймлайне обрезают сегмент вместе с футажом. Озвучка сохраняет свою скорость.','muted'));
+    }
     field(inspector,c!==base?'Скрыть футаж, показать исходный кадр':'Исключён из монтажа',c!==base?c.enabled===false:c.excluded,v=>set('excluded',v),{type:'checkbox'});
     field(inspector,'Выключить звук клипа',c.muted,v=>set('muted',v),{type:'checkbox'});
     field(advanced,'Громкость клипа',c.volume??1,v=>set('volume',v),{max:1,step:.05});

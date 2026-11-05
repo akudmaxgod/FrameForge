@@ -14,21 +14,21 @@ function button(text, onClick, className = 'montage-btn') {
   return b;
 }
 
-export function mountMediaLibraryButton(toolbar, { projectId, api: appApi, notice, beforeOpen }) {
+export function mountMediaLibraryButton(toolbar, { projectId, api: appApi, notice, beforeOpen, onManualAdd }) {
   const api = (path, options) => {
     const route = path.replace(/^\/api/, '');
     if (options?.method === 'DELETE') return appApi(route + '/delete', {});
     return appApi(route, options?.method === 'POST' ? (options.body || {}) : undefined);
   };
   const open = async fn => { try { await beforeOpen?.(); await fn(); } catch(e) { notice(e.message, true); } };
-  const btn = button('📁 Материалы для вставок', () => open(() => openMediaLibraryModal({ projectId, api, notice })), 'montage-btn montage-media-lib-btn');
+  const btn = button('📁 Материалы для вставок', () => open(() => openMediaLibraryModal({ projectId, api, notice, onManualAdd })), 'montage-btn montage-media-lib-btn');
   const matchBtn = button('✨ Подобрать вставки', () => open(() => openMediaMatchModal({ projectId, api, notice })), 'montage-btn montage-btn-accent');
-  const stockBtn = button('🔍 Pixabay', () => open(() => openStockSearchModal({ projectId, api, notice })), 'montage-btn');
+  const stockBtn = button('🔍 Pixabay', () => open(() => openStockSearchModal({ projectId, api, notice, onManualAdd })), 'montage-btn');
   toolbar.append(btn, stockBtn, matchBtn);
   return { libBtn: btn, stockBtn, matchBtn };
 }
 
-export async function openMediaLibraryModal({ projectId, api, notice }) {
+export async function openMediaLibraryModal({ projectId, api, notice, onManualAdd }) {
   const existing = document.querySelector('.media-library-overlay');
   if (existing) existing.remove();
 
@@ -58,7 +58,7 @@ export async function openMediaLibraryModal({ projectId, api, notice }) {
   }, 'montage-btn');
 
   const statusSpan = node('span', '', 'media-library-status');
-  const stockBtn = button('🔍 Найти на Pixabay', () => openStockSearchModal({ projectId, api, notice, onItemImported: () => loadItems() }), 'montage-btn montage-btn-accent');
+  const stockBtn = button('🔍 Найти на Pixabay', () => openStockSearchModal({ projectId, api, notice, onManualAdd, onItemImported: () => loadItems() }), 'montage-btn montage-btn-accent');
   tools.append(uploadBtn, fileInput, stockBtn, analyzeBtn, openMatchBtn, statusSpan);
 
   // The server reads local files itself; the browser only sends the folder path.
@@ -117,7 +117,7 @@ export async function openMediaLibraryModal({ projectId, api, notice }) {
   // Content grid
   const grid = node('div', null, 'media-library-grid');
 
-  modal.append(header, folderBox, tools, progressBox, grid);
+  modal.append(header, node('p','Фото и видео можно добавить на выбранный кадр вручную. Анализ нужен только для автоматического подбора.','media-library-status'), folderBox, tools, progressBox, grid);
   document.body.append(overlay);
 
   overlay.addEventListener('click', (e) => {
@@ -163,7 +163,7 @@ export async function openMediaLibraryModal({ projectId, api, notice }) {
         const segments = item.segments || [];
         const completedCount = segments.filter(s => s.analysis_status === 'completed').length;
         const statusClass = completedCount === segments.length ? 'status-ok' : (segments.some(s => s.analysis_status === 'failed') ? 'status-err' : 'status-pending');
-        const statusText = completedCount === segments.length ? `✓ Анализ готов (${segments.length} пл.)` : `⏳ Ожидает анализ (${completedCount}/${segments.length})`;
+        const statusText = segments.length && completedCount === segments.length ? `✓ Анализ готов (${segments.length} пл.)` : 'Можно добавить вручную · анализ необязателен';
         
         const statusEl = node('div', statusText, `media-card-status ${statusClass}`);
 
@@ -181,6 +181,7 @@ export async function openMediaLibraryModal({ projectId, api, notice }) {
         }, 'media-card-del-btn');
 
         info.append(nameEl, statusEl, descEl);
+        if(onManualAdd){const addBtn=button('+ На таймлайн',async()=>{addBtn.disabled=true;try{await onManualAdd(item);overlay.remove();}catch(e){notice(e.message,true);}finally{addBtn.disabled=false;}},'montage-btn montage-btn-primary');info.append(addBtn);}
         card.append(thumbBox, info, delBtn);
         grid.append(card);
       }
@@ -469,7 +470,7 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
 }
 
 
-export async function openStockSearchModal({ projectId, api, notice, onItemImported }) {
+export async function openStockSearchModal({ projectId, api, notice, onItemImported, onManualAdd }) {
   const existing = document.querySelector('.stock-search-overlay');
   if (existing) existing.remove();
 
@@ -693,6 +694,15 @@ export async function openStockSearchModal({ projectId, api, notice, onItemImpor
       importBtn.style.width = '100%';
 
       actionRow.append(importBtn);
+      if(onManualAdd){const addBtn=button('+ На таймлайн',async()=>{
+        addBtn.disabled=true;
+        try{
+          const res=await api(`/api/projects/${projectId}/stock/import`,{method:'POST',body:{external_id:item.external_id,media_type:item.media_type}});
+          if(!res.ok||!res.item)throw Error(res.error||'Ошибка импорта');
+          importedExtIds.add(item.external_id);onItemImported?.();
+          await onManualAdd(res.item);overlay.remove();
+        }catch(e){notice(e.message,true);}finally{addBtn.disabled=false;}
+      },'montage-btn montage-btn-accent');actionRow.append(addBtn);}
       card.append(thumbBox, infoBox, actionRow);
       grid.append(card);
     }

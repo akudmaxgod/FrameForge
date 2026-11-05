@@ -122,7 +122,7 @@ class Application:
             owner=service.db.one('SELECT project_id FROM '+parts[1]+' WHERE id=?',(parts[2],))
             if owner:service.project(owner['project_id'])
         if method == 'GET' and path == '/api/editorial-capabilities':
-            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc1', 'bridge_version': '0.1.82'}
+            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc2', 'bridge_version': '0.1.83'}
         if method == 'GET' and path == '/api/session':
             return {'token': self.token}
         if method == 'GET' and path == '/api/settings':
@@ -148,6 +148,11 @@ class Application:
                     return {'ok': False, 'status': 'not_configured', 'error': 'Ключ Pixabay API не настроен.'}
                 return check_pixabay_connection(key)
             raise DomainError('Ресурс не найден.', 404)
+        if parts == ['api', 'material-search', 'universes'] and method == 'GET':
+            from .material_search.query_builder import UNIVERSES
+            return {'ok': True, 'universes': [{'id': k, **v} for k, v in UNIVERSES.items()]}
+        if parts == ['api', 'material-search', 'providers'] and method == 'GET':
+            return {'ok': True, 'providers': service.material_search.list_providers()}
         if method == 'GET' and path == '/api/google-queue':
             from .google_queue import configured_queue
             queue = configured_queue(service.root,service.settings())
@@ -246,6 +251,7 @@ class Application:
                 'pending_command': bridge['command']['action'] if bridge['command'] else None,
                 'reference_casting': bridge.get('reference_casting', False),
                 'character_casting': bridge.get('character_casting', False),
+                'staged_image_batch': bridge.get('staged_image_batch', False),
                 'image_concurrency': bridge.get('image_concurrency', 1),
                 'active_image_requests': bridge.get('active_image_requests', 0),
             }
@@ -285,6 +291,7 @@ class Application:
                     bridge['character_casting']=data.get('character_casting') is True
                     bridge['quota_admission']=data.get('quota_admission') is True
                     bridge['images_only']=data.get('images_only') is True
+                    bridge['staged_image_batch']=data.get('staged_image_batch') is True
                     concurrency=data.get('image_concurrency',1)
                     bridge['image_concurrency']=min(4,max(1,concurrency)) if type(concurrency) is int else 1
                     active=data.get('active_image_requests',0)
@@ -301,9 +308,25 @@ class Application:
             project_id = (data or {}).get('project_id')
             scene_ids = (data or {}).get('scene_ids')
             generation_ids = (data or {}).get('generation_ids')
+            batch_stage = (data or {}).get('batch_stage')
             if action not in ('start', 'pause', 'check') or not isinstance(project_id, str):
                 raise DomainError('Некорректная команда моста.', 400)
             forgotten = service._project_profile_type(project_id) == 'forgotten_cities'
+            if batch_stage is not None:
+                if (batch_stage not in ('portraits', 'scenes') or action != 'start'
+                        or scene_ids is not None or generation_ids is not None or data.get('images_only') is not True):
+                    raise DomainError('Некорректный этап генерации Flow.', 400)
+                if batch_stage == 'portraits' and forgotten:
+                    raise DomainError('В этом профиле эталоны создаются в разделе локаций и реквизита.', 409)
+                if batch_stage == 'scenes':
+                    detail = service.detail(project_id)
+                    if any(req['kind'] == 'character' and not req['ready'] for req in detail['reference_requirements']):
+                        raise DomainError('Проверьте и закрепите обязательные портреты перед запуском сцен.', 409)
+                    if not detail['preflight'].get('ok'):
+                        errors = detail['preflight'].get('errors') or []
+                        raise DomainError('Генерация сцен заблокирована: ' + '; '.join(
+                            error.get('message') or error.get('code', '') for error in errors[:3]
+                        ), 409)
             character_cast = False
             if generation_ids is not None:
                 if (action != 'start' or scene_ids is not None or not isinstance(generation_ids, list)
@@ -314,7 +337,7 @@ class Application:
                 session = character_cast or service.db.one('SELECT * FROM reference_casts WHERE project_id=? AND generation_ids=?', (project_id, dump(generation_ids)))
                 if not session:
                     raise DomainError('Кастинг не принадлежит проекту.', 409)
-            elif forgotten and action == 'start' and scene_ids is None:
+            elif forgotten and action == 'start' and scene_ids is None and batch_stage is None:
                 if not service.project_preflight(project_id).get('ok'):
                     raise DomainError('Сначала закрепите обязательные эталоны.', 409)
             if scene_ids is not None:
@@ -332,6 +355,11 @@ class Application:
                 unavailable = (time.time() - bridge['last_seen'] >= BRIDGE_ADAPTER_TTL or not bridge['adapter_connected'] or not bridge['adapter_instance_id'])
                 if unavailable:
                     raise DomainError('Мост Flow не подключён. Откройте FrameForge Bridge и дождитесь подключения.', 409)
+                if batch_stage is not None:
+                    if not bridge.get('staged_image_batch'):
+                        raise DomainError('Обновите FrameForge Flow Bridge до 0.1.82 и перезагрузите вкладку Flow.', 409)
+                    if bridge['running'] or bridge['command'] or bridge.get('active_image_requests'):
+                        raise DomainError('Flow занят. Дождитесь завершения текущей операции.', 409)
                 if character_cast and not bridge.get('character_casting'):
                     raise DomainError('Обновите FrameForge Flow Bridge до 0.1.76 и перезагрузите вкладку Flow для одного нового портрета.',409)
                 if action == 'start' and bridge.get('running') and character_cast:
@@ -340,7 +368,7 @@ class Application:
                     raise DomainError('Обновите userscript Flow Bridge: требуется изолированный кастинг эталонов.', 409)
                 if action=='start' and data.get('images_only') is True and not bridge.get('images_only'):
                     raise DomainError('Для подготовки только кадров нужен обновлённый мост Flow.',409)
-                if action=='start' and generation_ids is None and service.settings().get('google_queue_enabled') is True and not bridge.get('quota_admission'):
+                if action=='start' and generation_ids is None and batch_stage != 'portraits' and service.settings().get('google_queue_enabled') is True and not bridge.get('quota_admission'):
                     raise DomainError('Для новой очереди нужен обновлённый мост Flow с ожиданием проверки кадров.',409)
                 if action != 'check' and bridge['project_id'] != project_id:
                     raise DomainError('Мост Flow не подключён к выбранному проекту. Нажмите «Проверить мост».', 409)
@@ -348,6 +376,8 @@ class Application:
                     raise DomainError('Обновите userscript FrameForge Flow Bridge и перезагрузите вкладку Flow: требуется запуск отдельного кадра.', 409)
                 command = {'id': secrets.token_urlsafe(12), 'action': action, 'project_id': project_id,
                            'scene_ids': scene_ids, 'generation_ids': generation_ids, 'images_only':data.get('images_only') is True}
+                if batch_stage is not None:
+                    command['batch_stage'] = batch_stage
                 bridge['command'] = command
                 if action == 'start':
                     bridge['animation_scene_ids'] = scene_ids
@@ -538,12 +568,84 @@ class Application:
                         )
                     raise DomainError('Метод не поддерживается.', 405)
                 raise DomainError('Ресурс не найден.', 404)
+            if len(parts) >= 4 and parts[3] == 'material-search':
+                service.project(project_id)
+                ms = service.material_search
+                if len(parts) == 5 and parts[4] == 'plans' and method == 'POST':
+                    return ms.create_plan(project_id, (data or {}).get('scene_ids'), (data or {}).get('options'))
+                if len(parts) == 6 and parts[4] == 'plans' and method == 'GET':
+                    return ms.get_plan(project_id, parts[5])
+                if len(parts) == 7 and parts[4] == 'plans' and parts[6] == 'update' and method == 'POST':
+                    req_data = data or {}
+                    return ms.update_plan_requirement(
+                        project_id, parts[5], req_data.get('requirement_id'),
+                        req_data.get('user_queries'), req_data.get('requested_role'), req_data.get('enabled')
+                    )
+                if len(parts) == 5 and parts[4] == 'jobs' and method == 'POST':
+                    return ms.start_job(project_id, (data or {}).get('plan_id'), (data or {}).get('providers'))
+                if len(parts) == 6 and parts[4] == 'jobs' and method == 'GET':
+                    return ms.get_job(project_id, parts[5])
+                if len(parts) == 7 and parts[4] == 'jobs' and parts[6] == 'cancel' and method == 'POST':
+                    return ms.cancel_job(project_id, parts[5])
+                if len(parts) == 7 and parts[4] == 'jobs' and parts[6] == 'candidates' and method == 'GET':
+                    return {'ok': True, 'candidates': ms.get_job_candidates(project_id, parts[5])}
+                if len(parts) == 7 and parts[4] == 'candidates' and parts[6] == 'import' and method == 'POST':
+                    return ms.import_candidate(project_id, parts[5])
+                if len(parts) == 7 and parts[4] == 'candidates' and parts[6] == 'apply' and method == 'POST':
+                    return ms.apply_candidate_to_segment(project_id, parts[5], (data or {}).get('expected_revision'))
+                if len(parts) == 6 and parts[4] == 'candidates' and parts[5] == 'rollback' and method == 'POST':
+                    return ms.rollback_candidate_overlay(project_id, (data or {}).get('origin_clip_ids', []), (data or {}).get('expected_revision'))
+                if len(parts) == 5 and parts[4] == 'credits' and method == 'GET':
+                    fmt = (data or {}).get('format', 'text')
+                    return {'ok': True, 'credits': ms.export_credits(project_id, fmt)}
+                if len(parts) == 5 and parts[4] == 'entities' and method == 'GET':
+                    return {'ok': True, 'entities': [e.to_dict() for e in ms.planner.entities.get_project_entities(project_id)]}
+                if len(parts) == 5 and parts[4] == 'image-link' and method == 'POST':
+                    return ms.import_image_link(project_id, (data or {}).get('url'))
+                if len(parts) == 5 and parts[4] == 'browse' and method == 'POST':
+                    b_data = data or {}
+                    return ms.browse_materials(
+                        project_id=project_id,
+                        query=b_data.get('query', ''),
+                        universe_id=b_data.get('universe_id'),
+                        adaptation=b_data.get('adaptation', 'any'),
+                        image_type=b_data.get('image_type', 'any'),
+                        filters=b_data.get('filters'),
+                        provider=b_data.get('provider', 'searxng')
+                    )
+                if len(parts) == 6 and parts[4] == 'browse' and method == 'GET':
+                    return ms.get_browse_session(project_id, parts[5])
+                if len(parts) == 8 and parts[4] == 'browse' and parts[6] == 'items' and parts[7] == 'import' and method == 'POST':
+                    # parts: ['api', 'projects', pid, 'material-search', 'browse', session_id, 'items', item_id, 'import'] - wait, len=9 if item_id is separate
+                    pass
+                if len(parts) == 9 and parts[4] == 'browse' and parts[6] == 'items' and parts[8] == 'import' and method == 'POST':
+                    return ms.import_browse_item(project_id, parts[5], parts[7])
+                if len(parts) == 9 and parts[4] == 'browse' and parts[6] == 'items' and parts[8] == 'apply' and method == 'POST':
+                    a_data = data or {}
+                    return ms.apply_browse_item_to_clip(
+                        project_id=project_id,
+                        session_id=parts[5],
+                        item_id=parts[7],
+                        clip_id=a_data.get('clip_id'),
+                        expected_revision=a_data.get('expected_revision')
+                    )
+                if len(parts) == 9 and parts[4] == 'browse' and parts[6] == 'items' and parts[8] == 'verify' and method == 'POST':
+                    v_data = data or {}
+                    return ms.verify_browse_item(
+                        project_id=project_id,
+                        session_id=parts[5],
+                        item_id=parts[7],
+                        quote=v_data.get('quote')
+                    )
+                raise DomainError('Ресурс material-search не найден.', 404)
             if len(parts) >= 4 and parts[3] == 'edit':
                 if len(parts) == 5 and parts[4] == 'media-folder':
                     if method == 'GET': return service.media_folder.latest(project_id)
                     if method == 'POST': return service.media_folder.start(project_id, data or {})
                     raise DomainError('Не найдено.', 404)
                 if len(parts) >= 5 and parts[4] == 'media-library':
+                    if len(parts) == 7 and parts[6] == 'clip' and method == 'POST':
+                        return service.editing.library_clip(project_id, parts[5])
                     if len(parts) == 5 and method == 'GET':
                         return service.media_library.list_items(project_id)
                     if len(parts) == 6 and parts[5] == 'import' and method == 'POST':
@@ -677,6 +779,9 @@ class Application:
             if len(parts) == 4 and parts[3] in ('channel-update-apply', 'channel_update_apply') and method == 'POST':
                 return service.apply_project_channel_update(project_id, target_version_id=(data or {}).get('target_version_id'))
             if len(parts) == 4 and parts[3] == 'prompts' and method == 'GET':
+                params = query_params or {}
+                if client == 'google-flow' and (params.get('references_only') == ['1'] or params.get('portraits_only') == ['1']):
+                    return service.project_prompts(project_id, scene_ids=[])
                 return service.project_prompts(project_id)
             if len(parts) == 4 and parts[3] == 'pin-participant' and method == 'POST':
                 from .participant_identity import pin_participant
@@ -732,6 +837,8 @@ class Application:
                         if connection.execute("SELECT id FROM generations WHERE project_id=? AND purpose='analysis' AND state='waiting_review' LIMIT 1", (project_id,)).fetchone():
                             raise DomainError('Готовый разбор ожидает проверки. Отмените его перед новым анализом.', 409)
                         has_scenes = connection.execute('SELECT id FROM scenes WHERE project_id=? LIMIT 1', (project_id,)).fetchone()
+                        if has_scenes and rebuild:
+                            service._require_unreviewed_analysis(connection, project_id)
                         if has_scenes and not rebuild:
                             raise DomainError('Разбор уже сохранён. Редактируйте сцены или создайте новый проект.', 409)
                         if rebuild and connection.execute(
@@ -959,7 +1066,7 @@ def make_server(app, port=8765):
             self.send_header('Access-Control-Allow-Private-Network', 'true')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
             self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Session-Token, X-Client, X-File-Name')
-            self.send_header('Content-Security-Policy', "default-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://*.pixabay.com https://pixabay.com https://*.vimeocdn.com; media-src 'self' blob: data: https://*.pixabay.com https://pixabay.com; frame-ancestors 'none'")
+            self.send_header('Content-Security-Policy', "default-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://*.pixabay.com https://pixabay.com https://*.vimeocdn.com https://*.wikimedia.org https://commons.wikimedia.org https://upload.wikimedia.org https://*.wikipedia.org; media-src 'self' blob: data: https://*.pixabay.com https://pixabay.com; frame-ancestors 'none'")
             for key, value in (extra or {}).items():
                 self.send_header(key, value)
             try:
@@ -1087,6 +1194,15 @@ def make_server(app, port=8765):
                             raise DomainError('Тело запроса должно быть объектом.')
                     else:
                         data = {}
+                if method == 'GET' and '/material-search/browse/' in path and path.endswith('/preview'):
+                    req_parts = path.strip('/').split('/')
+                    if len(req_parts) == 9 and req_parts[0] == 'api' and req_parts[1] == 'projects' and req_parts[3] == 'material-search' and req_parts[4] == 'browse' and req_parts[6] == 'items' and req_parts[8] == 'preview':
+                        project_id = req_parts[2]
+                        session_id = req_parts[5]
+                        item_id = req_parts[7]
+                        prev = app.service.material_search.get_browse_item_preview(project_id, session_id, item_id)
+                        self.send_body(200, prev['bytes'], prev.get('content_type', 'image/jpeg'))
+                        return
                 if method == 'GET' and path.startswith('/api/channel_references/'):
                     asset_id = path.split('/')[-1]
                     ref = app.service.db.one('SELECT file_path FROM channel_reference_assets WHERE id=?', (asset_id,))

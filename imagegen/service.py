@@ -136,6 +136,7 @@ def public_settings(settings, root=None):
     else:
         result['pixabay_key_configured'] = False
     result['pixabay_api_key'] = ''
+    result['material_search_enabled'] = bool(settings.get('material_search_enabled', False))
     return result
 
 class Service:
@@ -158,6 +159,8 @@ class Service:
         self.pixabay = PixabayProvider(self)
         from .media_folder_workflow import MediaFolderWorkflow
         self.media_folder = MediaFolderWorkflow(self)
+        from .material_search import MaterialSearchService
+        self.material_search = MaterialSearchService(self)
 
     def _project_profile_type(self, project_id):
         row = self.db.one('''SELECT cp.profile_type
@@ -1328,8 +1331,16 @@ class Service:
     def project_preflight(self, project_id):
         return self.detail(project_id)['preflight']
 
+    def _require_unreviewed_analysis(self, connection, project_id):
+        current = connection.execute('SELECT analysis_metadata FROM projects WHERE id=?',(project_id,)).fetchone()
+        metadata = json.loads(current[0] or '{}') if current else {}
+        reviewed_scene = connection.execute("SELECT 1 FROM scenes s JOIN scene_revisions r ON r.scene_id=s.id AND r.revision=s.current_revision WHERE s.project_id=? AND r.data LIKE '%project_specific_human_review%' LIMIT 1",(project_id,)).fetchone()
+        if metadata.get('project_analysis_review') or reviewed_scene:
+            raise DomainError('В проекте есть проверенные ручные правки разбора. Автоматическая замена запрещена; создайте копию проекта для нового разбора.',409)
+
     def _clear_analysis_for_replacement(self, connection, project_id):
         """Only the final save transaction can replace an unused analysis."""
+        self._require_unreviewed_analysis(connection, project_id)
         if connection.execute("SELECT id FROM generations WHERE project_id=? AND purpose NOT IN ('analysis','edit_audio') LIMIT 1", (project_id,)).fetchone():
             raise DomainError('После начала создания изображений или видео повторный разбор запрещён. Создайте новый проект.', 409)
         connection.execute('DELETE FROM scene_revisions WHERE scene_id IN (SELECT id FROM scenes WHERE project_id=?)', (project_id,))
@@ -1450,12 +1461,36 @@ class Service:
             raise DomainError('Выбранный режим не использует этот тип постоянных эталонов.', 409)
         """Build the same immutable identity request for manual and automatic casting."""
         profile = {**(profile or self.profile()), 'width': 768, 'height': 432}
+        from .subject_policy import enrich
+        from .visual_style import is_marker_style, is_gritty_style, GRITTY_FLOW_STYLE, GRITTY_INK_STYLE
+        character = enrich([character], project.get('cast_bible'))[0]
         subject = 'reference subject' if project['mode'] == 'objects' else 'character'
         requirements = ({'gender': None, 'age': None, 'one_person': False}
-                        if project['mode'] == 'objects' else
-                        character_requirements(character['description'], character['name']))
+                        if project['mode'] == 'objects' and not is_nonhuman_character(character) else
+                        character_requirements(character['description'], character['name'], character['entity_type']))
         age, gender = requirements['age'], requirements['gender']
-        from .visual_style import is_marker_style, marker_contract
+        if requirements.get('entity_type') == 'nonhuman':
+            style = project['style']
+            if is_gritty_style(style):
+                style = GRITTY_INK_STYLE
+            elif is_marker_style(style):
+                style = 'Minimalist Marker Explainer, hand-drawn 2D ink, clean contours and flat muted colors'
+            for old_style, new_style in (
+                ('realistic human faces and anatomy', 'realistic animal anatomy'),
+                ('natural skin texture', 'natural fur, skin and hide texture'),
+                ('consistent character design', 'coherent wildlife subject design'),
+            ):
+                style = style.replace(old_style, new_style)
+            prompt = (f"Style: {style}. One non-human animal or creature reference, {character['name']}: {character['description']}. "
+                      "Depict exactly one complete animal, with species-appropriate anatomy, natural proportions, "
+                      "limbs, paws, fins, wings and tail as applicable, scales or skin, markings and horns if described. "
+                      "Full-body three-quarter wildlife reference in a simple natural setting, with the entire body visible. "
+                      "No people, no human face, no human body, no humanoid anatomy, no clothes, no human portrait, no hands, no human silhouette. "
+                      "One continuous image only; never make a collage, contact sheet, split screen, diptych, triptych or panel layout. "
+                      "No text, captions, letters, numbers, logos, watermarks, signs or interface elements.")
+            return {'profile': profile, 'prompt': prompt, 'references': [], 'wardrobe_key': None,
+                    'character_description': character['description'], 'age_constraint': None, 'gender_constraint': None,
+                    'character_requirements': requirements, 'style': style}
         if is_marker_style(project.get('style')):
             from .portrait_contract import identity_description, subject_gender
             identity = identity_description(character['description'])
@@ -1489,24 +1524,23 @@ class Service:
             return {'profile': profile, 'prompt': prompt, 'references': [], 'wardrobe_key': None,
                     'character_description': character['description'], 'age_constraint': age, 'gender_constraint': gender,
                     'character_requirements': requirements, 'style': project['style'], 'appearance_design': design}
-        if requirements.get('entity_type') == 'nonhuman':
-            style = project['style']
-            for old_style, new_style in (
-                ('realistic human faces and anatomy', 'realistic animal anatomy'),
-                ('natural skin texture', 'natural fur, skin and hide texture'),
-                ('consistent character design', 'coherent wildlife subject design'),
-            ):
-                style = style.replace(old_style, new_style)
-            prompt = (f"Style: {style}. One non-human animal or creature reference: {character['description']}. "
-                      "Depict exactly one complete animal, with species-appropriate anatomy, natural proportions, "
-                      "limbs, hooves/paws/fins/wings as applicable, coat or skin, markings and horns if described. "
-                      "Full-body three-quarter wildlife reference in a simple natural setting, with the entire body visible. "
-                      "No people, no human face, no human body, no clothes, no human portrait, no hands, no human silhouette. "
-                      "One continuous image only; never make a collage, contact sheet, split screen, diptych, triptych or panel layout. "
-                      "No text, captions, letters, numbers, logos, watermarks, signs or interface elements.")
+        # GRITTY_IDENTITY_REFERENCE_BEGIN
+        if is_gritty_style(project.get('style')) and project.get('mode') != 'objects':
+            prompt = ('SOLO IDENTITY REFERENCE. Exactly one person, one head, one continuous head-and-shoulders portrait, '
+                      'facing camera on a clean plain neutral background. No scene, companions, props, panels or collage. '
+                      'Character name: ' + character.get('name', '') + '. Identity description: ' + character.get('description', '') + '. '
+                      'For an established named fictional hero, preserve the recognizable screen identity specified by the story '
+                      'and description: individual facial structure, eyes, nose, hairline, hairstyle, age, scars and distinctive features. '
+                      'Do not randomly redesign a known hero or replace them with a generic attractive face. If this is an original '
+                      'or unspecified character, follow only their individual description. Preserve explicitly requested adaptation '
+                      'and story-period differences. A required eyepatch or scar belongs only to the described character. '
+                      'The face is clearly readable; keep specified period clothing and identifying accessories. Style: ' + GRITTY_FLOW_STYLE)
+            if age: prompt += ' Required age: ' + age['label'] + '.'
+            if gender: prompt += ' Required gender: ' + gender['label'] + '.'
             return {'profile': profile, 'prompt': prompt, 'references': [], 'wardrobe_key': None,
-                    'character_description': character['description'], 'age_constraint': None, 'gender_constraint': None,
-                    'character_requirements': requirements, 'style': style}
+                    'character_description': character['description'], 'age_constraint': age, 'gender_constraint': gender,
+                    'character_requirements': requirements, 'style': project['style']}
+        # GRITTY_IDENTITY_REFERENCE_END
         # A project world can mention another character's age (for example, an
         # elderly mother). Including it in every portrait caused the compact
         # diffusion model to copy that age onto the daughter.  Casting needs a
@@ -2437,7 +2471,32 @@ class Service:
         snapshot['source_fidelity_review'] = verdict
         return verdict
 
-    def scene_snapshot(self, scene, allow_unlocked=False, *, _project=None, _narrative_grounder=None):
+    def _panorama_camera_plan(self, project, scenes=None):
+        if project.get('camera_mode') != 'panorama':
+            return {}
+        if scenes is None:
+            rows = self.db.all("""SELECT s.id,s.position,s.current_revision,r.data FROM scenes s
+                JOIN scene_revisions r ON r.scene_id=s.id AND r.revision=s.current_revision
+                WHERE s.project_id=? ORDER BY s.position""", (project['id'],))
+            scenes = [{**r, 'data': json.loads(r['data'])} for r in rows]
+        signature = fingerprint({'pacing': project.get('camera_pacing'), 'scenes': [
+            (s['id'], s.get('position'), s.get('current_revision'), s['data']) for s in scenes],
+            'cast': [(c.get('id'), c.get('name'), c.get('cast_id'), c.get('entity_type'),
+                      c.get('identity_scope')) for c in project.get('characters', [])],
+            'bible': project.get('cast_bible')})
+        cache = getattr(self, '_panorama_plan_cache', {})
+        existing = cache.get(project['id'])
+        if existing and existing[0] == signature:
+            return existing[1]
+        from .panorama_camera import build_plan
+        plan = build_plan(project, scenes)
+        if len(cache) >= 4:
+            cache = {}
+        cache[project['id']] = (signature, plan)
+        self._panorama_plan_cache = cache
+        return plan
+
+    def scene_snapshot(self, scene, allow_unlocked=False, *, _project=None, _narrative_grounder=None, _resources=None, _camera_plan=None):
         project = _project if _project is not None else self.project(scene['project_id'])
         scene = {**scene, 'data': {**scene['data'], 'camera_sequence_index': max(0, scene.get('position', 1)-1)}}
         from .prompt_import import metadata as prompt_import_metadata, snapshot as imported_snapshot
@@ -2450,9 +2509,13 @@ class Service:
         if is_forgotten_cities:
             scene = ({**scene,'data':_narrative_grounder(scene['data'])} if _narrative_grounder
                      else self._ground_forgotten_scene(scene, project))
-        characters = self.db.all('SELECT * FROM characters WHERE project_id=?', (project['id'],))
         from .subject_policy import enrich, normalize_scene
-        characters = enrich(characters, project.get('cast_bible'))
+        if _resources is None:
+            characters = enrich(self.db.all('SELECT * FROM characters WHERE project_id=?', (project['id'],)), project.get('cast_bible'))
+            locations = self.db.all('SELECT * FROM locations WHERE project_id=?', (project['id'],))
+            props = self.db.all('SELECT * FROM props WHERE project_id=?', (project['id'],))
+        else:
+            characters, locations, props = _resources
         project = {**project, 'characters': characters}
         from .character_selection import resolve_links
         linked, link_errors = resolve_links(scene['data'], characters)
@@ -2463,9 +2526,14 @@ class Service:
         by_name = {c['name']: c for c in characters}
         selected = [by_name[name] for name in linked['characters'] if name in by_name]
         selected_humans = [character for character in selected if not is_nonhuman_character(character)]
-        locations = self.db.all('SELECT * FROM locations WHERE project_id=?', (project['id'],))
         from .generation_scene import normalize as normalize_generation_scene
         scene = {**scene, 'data': normalize_generation_scene(project, scene['data'], locations)}
+        if project.get('camera_mode') == 'panorama':
+            camera_plan = _camera_plan if _camera_plan is not None else self._panorama_camera_plan(project)
+            from .panorama_camera import selection as camera_selection
+            camera_data = {**scene['data'], 'panorama_camera': camera_plan.get(scene['id'])}
+            camera_data['panorama_camera'] = camera_selection(project, camera_data)
+            scene = {**scene, 'data': camera_data}
         location_by_name = {item['name']: item for item in locations}
         selected_locations = ([location_by_name[scene['data']['location_ref']]]
                               if scene['data'].get('location_ref') and scene['data']['location_ref'] in location_by_name else [])
@@ -2474,7 +2542,6 @@ class Service:
             selected_locations = scene_locations(project, scene['data'], locations)
         from .generation_scene import reference_locations
         selected_locations, reference_omissions = reference_locations(project, scene['data'], selected_locations)
-        props = self.db.all('SELECT * FROM props WHERE project_id=?', (project['id'],))
         mode = project.get('mode')
         from .mode_policy import allows, filter_references
         if not allows(project, 'location'): selected_locations = []
@@ -2541,8 +2608,10 @@ class Service:
             selected = []
             selected_humans = []
         from .domain import people_count_unresolved
-        unresolved_people=people_count_unresolved(scene['data']) and not selected_humans
-        if unresolved_people:expected_people=0  # unknown census, never a verified zero
+        unresolved_people = people_count_unresolved(scene['data'])
+        if unresolved_people:
+            # Named identities establish a minimum, not the group's total census.
+            expected_people = len(selected_humans)
         uninhabited = expected_people == 0 and not unresolved_people and scene['data'].get('subject_state') != 'buried_remains'
         if expected_people < len(selected_humans):
             raise DomainError('В сцене указано меньше видимых людей, чем выбранных персонажей.')
@@ -2623,6 +2692,7 @@ class Service:
             'uninhabited': uninhabited,
             'expected_people': expected_people,
             'people_count_unresolved': unresolved_people,
+            'camera_plan': prompt_scene.get('panorama_camera'),
             'detail_faces': False,
             'scene': prompt_scene,
             'story_hash': fingerprint(project['story']),
@@ -3090,7 +3160,13 @@ class Service:
         prop_map = {p['id']: p for p in detail.get('props', [])}
         scenes = []
         prev_contract = None
-        for s in detail['scenes']:
+        source_scenes = [] if requested_ids is not None and not requested_ids else detail['scenes']
+        resources = (detail.get('characters', []), detail.get('locations', []), detail.get('props', []))
+        camera_plan = self._panorama_camera_plan(detail, source_scenes)
+        settings = self.settings()
+        source_contract_enabled = settings.get('source_contract_enabled') is True
+        google_queue_enabled = settings.get('google_queue_enabled') is True
+        for s in source_scenes:
             if (detail.get('channel_profile') or {}).get('profile_type') == 'forgotten_cities':
                 try:
                     if prompt_ground_error:raise prompt_ground_error
@@ -3137,33 +3213,31 @@ class Service:
             normalized_scene = {**s, 'data': normalized_scene_data}
 
             # 3. Form snapshot, Flow prompt, and references from the normalized scene
-            snapshot = self.scene_snapshot(normalized_scene, allow_unlocked=True,_project=detail,_narrative_grounder=prompt_grounder)
+            snapshot = self.scene_snapshot(normalized_scene, allow_unlocked=True, _project=detail,
+                                           _narrative_grounder=prompt_grounder, _resources=resources, _camera_plan=camera_plan)
             normalized_scene_data = snapshot['scene']
 
-            scene_chars = [cast_map[cid] for cid in contract['visible_character_ids'] if cid in cast_map]
-            if not scene_chars and contract['visible_characters']:
-                name_to_cast = {c['name'].casefold(): c for c in detail.get('characters', [])}
-                scene_chars = [name_to_cast[cn.casefold()] for cn in contract['visible_characters'] if cn.casefold() in name_to_cast]
-
-            scene_locs = [l for l in detail.get('locations', []) if l['name'] == normalized_scene_data.get('location_ref') or l['name'] == normalized_scene_data.get('location')]
-            if (detail.get('channel_profile') or {}).get('profile_type') == 'forgotten_cities':
-                scene_locs = [{**loc_map[r['location_id']], 'reference_scope': r.get('scope'),
-                               'anchor_id': r.get('anchor_id')}
-                              for r in snapshot.get('references', [])
-                              if r.get('location_id') in loc_map]
-            scene_props = [p for p in detail.get('props', []) if prop_is_story(p) and any(sp.get('name') == p['name'] and sp.get('visible', True) and sp.get('state') != 'absent' for sp in normalized_scene_data.get('props', []))]
-
-            normalized_scene_data = {**normalized_scene_data, 'camera_sequence_index': max(0, s.get('position',1)-1)}
-            flow_prompt = compile_flow_prompt(detail, normalized_scene_data, characters=scene_chars, locations=scene_locs, props=scene_props)
-
-            from .forgotten_cities.retries import retry_prompt
-            flow_prompt = retry_prompt(flow_prompt, snapshot.get('source_fidelity_retry'))
             wire = snapshot.get('flow_wire')
             if wire:
                 flow_prompt = wire['prompt']
-            elif snapshot.get('source_contract'):
-                from .source_contract import render_contract
-                flow_prompt+='\nFINAL RENDER CONTRACT (scene constraints; never image lettering):\n'+dump(render_contract(snapshot['source_contract']))
+            else:
+                scene_chars = [cast_map[cid] for cid in contract['visible_character_ids'] if cid in cast_map]
+                if not scene_chars and contract['visible_characters']:
+                    name_to_cast = {c['name'].casefold(): c for c in detail.get('characters', [])}
+                    scene_chars = [name_to_cast[cn.casefold()] for cn in contract['visible_characters'] if cn.casefold() in name_to_cast]
+                scene_locs = [l for l in detail.get('locations', []) if l['name'] == normalized_scene_data.get('location_ref') or l['name'] == normalized_scene_data.get('location')]
+                if forgotten:
+                    scene_locs = [{**loc_map[r['location_id']], 'reference_scope': r.get('scope'),
+                                   'anchor_id': r.get('anchor_id')}
+                                  for r in snapshot.get('references', []) if r.get('location_id') in loc_map]
+                scene_props = [p for p in detail.get('props', []) if prop_is_story(p) and any(sp.get('name') == p['name'] and sp.get('visible', True) and sp.get('state') != 'absent' for sp in normalized_scene_data.get('props', []))]
+                normalized_scene_data = {**normalized_scene_data, 'camera_sequence_index': max(0, s.get('position', 1)-1)}
+                flow_prompt = compile_flow_prompt(detail, normalized_scene_data, characters=scene_chars, locations=scene_locs, props=scene_props)
+                from .forgotten_cities.retries import retry_prompt
+                flow_prompt = retry_prompt(flow_prompt, snapshot.get('source_fidelity_retry'))
+                if snapshot.get('source_contract'):
+                    from .source_contract import render_contract
+                    flow_prompt += '\nFINAL RENDER CONTRACT (scene constraints; never image lettering):\n' + dump(render_contract(snapshot['source_contract']))
             from .flow_prompt_budget import pack, units, BASE_BUDGET
             flow_prompt=pack(flow_prompt)
             scene_refs = []
@@ -3216,12 +3290,12 @@ class Service:
             if wire and wire.get('error'):
                 ready_for_flow = False
                 flow_error = wire['error']
-            if (self.settings().get('source_contract_enabled') is True
+            if (source_contract_enabled
                     and (detail.get('channel_profile') or {}).get('profile_type')=='forgotten_cities'
                     and not detail['preflight'].get('ok')):
                 ready_for_flow=False
                 flow_error='; '.join(e['message'] for e in detail['preflight'].get('errors',[])[:3])
-            if self.settings().get('source_contract_enabled') is True and ((visual_reviews_enabled() and self.settings().get('google_queue_enabled') is not True) or snapshot.get('source_contract',{}).get('status')!='bound'):
+            if source_contract_enabled and ((visual_reviews_enabled() and not google_queue_enabled) or snapshot.get('source_contract',{}).get('status')!='bound'):
                 ready_for_flow=False
                 flow_error=flow_error or '; '.join(snapshot.get('source_contract',{}).get('conflicts',[])) or 'Итоговое задание или бесплатная очередь требуют внимания.'
             if self.db.one("SELECT id FROM generations WHERE scene_id=? AND scene_revision=? AND state='queued' AND cancel_requested=0 AND json_extract(snapshot,'$.plan_review_wait') IS NOT NULL LIMIT 1",(s['id'],s['current_revision'])):
@@ -3247,7 +3321,7 @@ class Service:
             scenes.append({
                 'scene_id': s['id'],
                 'revision':s['current_revision'],
-                'google_queue_enabled':self.settings().get('google_queue_enabled') is True,
+                'google_queue_enabled': google_queue_enabled,
                 'source_contract':snapshot.get('source_contract'),
                 'position': s['position'],
                 'beat': normalized_scene_data.get('beat', ''),
@@ -3257,6 +3331,7 @@ class Service:
                 'flow_prompt_hash': wire.get('prompt_hash') if wire else None,
                 'reference_omissions': snapshot.get('reference_omissions', []),
                 'comfy_prompt': snapshot['prompt'],
+                'camera_plan': snapshot.get('camera_plan'),
                 'source_fidelity_retry': snapshot.get('source_fidelity_retry', {}),
                 'has_image': bool(active_image_asset_id and not s.get('stale')
                                   and not pending_flow_generation),
@@ -3286,17 +3361,24 @@ class Service:
         if not allows(detail, 'character'): manual_ids = set()
         manual_characters = []
         for c in (c for c in detail['characters'] if c['id'] in selected_ids or c['id'] in manual_ids):
+            pending_cast = next((
+                g['id'] for g in reversed(detail.get('generations', []))
+                if g.get('character_id') == c['id'] and g.get('character_revision') == c['revision']
+                and g.get('purpose') == 'casting' and g.get('state') == 'queued' and not g.get('cancel_requested')
+            ), None)
             variants_count = len([
                 g for g in detail.get('generations', [])
-                if g.get('character_id') == c['id'] and g.get('state') == 'succeeded' and g.get('asset_id') and not g.get('snapshot', {}).get('wardrobe_key')
+                if g.get('character_id') == c['id'] and g.get('character_revision') == c['revision']
+                and g.get('state') == 'succeeded' and g.get('asset_id') and not g.get('snapshot', {}).get('wardrobe_key')
             ])
             target_list = characters if c['id'] in selected_ids else manual_characters
             target_list.append({
                 'id': c['id'],
                 'name': c['name'],
                 'prompt': self.casting_snapshot(detail, c)['prompt'],
-                'locked': bool(c.get('locked')) and not any(g.get('character_id') == c['id'] and g.get('purpose') == 'casting' and g.get('state') == 'queued' and not g.get('cancel_requested') for g in detail.get('generations',[])),
-                'casting_generation_id': next((g['id'] for g in reversed(detail.get('generations',[])) if g.get('character_id') == c['id'] and g.get('purpose') == 'casting' and g.get('state') == 'queued' and not g.get('cancel_requested')),None),
+                'locked': bool(c.get('locked')) and pending_cast is None,
+                'portrait_confirmed': bool(c.get('locked') and c.get('references', {}).get('portrait')),
+                'casting_generation_id': pending_cast,
                 'portrait': c.get('references', {}).get('portrait'),
                 'portrait_url': f"/api/assets/{c.get('references', {}).get('portrait')}" if c.get('references', {}).get('portrait') else None,
                 'variants_count': variants_count,
@@ -3352,7 +3434,7 @@ class Service:
         locked_props = [p for p in props if p['locked'] and p.get('prop')]
 
         known_hashes = set()
-        for s in detail.get('scenes', []):
+        for s in source_scenes:
             active_gen = s.get('active_generation_id')
             if active_gen:
                 a = self.db.one('SELECT sha256 FROM assets WHERE generation_id=?', (active_gen,))

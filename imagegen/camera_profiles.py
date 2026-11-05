@@ -12,6 +12,9 @@ def instruction(project, scene):
     if scene.get('frame_composition'):
         return ''  # A manually reviewed composition takes priority.
     mode = project.get('camera_mode','cinema')
+    if mode == 'panorama':
+        from .panorama_camera import instruction as panorama_instruction
+        return panorama_instruction(project, scene)
     if mode == 'custom':
         return ('CAMERA: ' + str(project.get('camera_custom',''))[:1000] + '. Camera wording changes framing only; preserve all source facts and participants. Add no people, objects or medical events.')
     sequence = SEQUENCES.get(mode, SEQUENCES['cinema'])

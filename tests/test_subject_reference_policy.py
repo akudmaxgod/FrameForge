@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from imagegen.subject_policy import policy, enrich, normalize_scene
 from imagegen.character_selection import project_selection
-from imagegen.domain import resolve_scene_presence_contract, compile_flow_prompt
+from imagegen.domain import resolve_scene_presence_contract, compile_flow_prompt, validate_project_preflight
 
 
 def character(name, description, **extra):
@@ -77,6 +77,46 @@ class SubjectPolicyTests(unittest.TestCase):
         contract=resolve_scene_presence_contract(scene([c]),[c],[{'id':'loc','name':'Луг'}],require_locked_portraits=True)
         self.assertEqual(contract['visible_people'],0)
         self.assertFalse(contract['render_ready'])
+
+    def test_preflight_excludes_named_creatures_from_human_count(self):
+        dragon = character('Аша', 'Огромный крылатый дракон.', entity_type='creature')
+        rider = {**character('Мира', 'Всадница.'), 'id': 'uuid-b', 'cast_id': 'ch_b', 'entity_type': 'human'}
+        locations = [{'id': 'loc', 'name': 'Луг'}]
+        for cast, quote, human_count in [
+            ([dragon], 'Аша пролетает над лугом.', 0),
+            ([rider, dragon], 'Мира стоит возле дракона Аши.', 1),
+        ]:
+            with self.subTest(human_count=human_count):
+                data = {**scene(cast, quote), 'visible_people': human_count, 'raw_visible_people': human_count}
+                contract = resolve_scene_presence_contract(data, cast, locations)
+                self.assertEqual(contract['visible_people'], human_count)
+                self.assertEqual(len(contract['visible_character_ids']), len(cast))
+                result = validate_project_preflight({
+                    'story': quote, 'characters': cast, 'locations': locations, 'scenes': [{'data': data}],
+                })
+                self.assertNotIn('presence_count_invariant_violation', {e['code'] for e in result['errors']})
+
+    def test_fantasy_creature_keeps_story_scale_and_nonhuman_casting(self):
+        from imagegen.service import Service
+        from imagegen.visual_style import GRITTY_FLOW_STYLE, MARKER_PREFIX
+        dragon = character('Аша', 'Огромный крылатый дракон, species: dragon.')
+        bible = {'characters': [{'cast_id': dragon['cast_id'], 'entity_type': 'creature'}]}
+        service = object.__new__(Service)
+        for style in (GRITTY_FLOW_STYLE, MARKER_PREFIX):
+            snapshot = service.casting_snapshot(
+                {'mode': 'dynamic', 'style': style, 'cast_bible': bible}, dragon, profile={'test': True},
+            )
+            self.assertFalse(snapshot['character_requirements']['one_person'])
+            self.assertIn('no humanoid anatomy', snapshot['prompt'])
+            self.assertIn('entire body visible', snapshot['prompt'])
+            self.assertNotIn('exactly one person', snapshot['prompt'].lower())
+        creature = enrich([dragon], bible)[0]
+        data = {**scene([creature], 'Крылатый дракон Аша пролетает над лугом.'), 'visible_people': 0}
+        prompt = compile_flow_prompt({'mode': 'dynamic', 'style': GRITTY_FLOW_STYLE}, data, characters=[creature])
+        self.assertIn('No humanoid body', prompt)
+        self.assertIn('scale at this point in the story', prompt)
+        self.assertNotIn('real-world adult dimensions', prompt)
+        self.assertNotIn('Never substitute fantasy creatures', prompt)
 
     def test_bible_metadata_survives_persisted_registry_shape(self):
         c=character('Нарвал','Обитатель моря.')

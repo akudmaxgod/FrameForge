@@ -14,7 +14,7 @@ from functools import lru_cache
 
 from razdel import sentenize
 
-VERSION='text-storyboard/2'
+VERSION='text-storyboard/4'
 WORDS=re.compile(r"[^\W_]+(?:[-’'][^\W_]+)*",re.UNICODE)
 
 @lru_cache(maxsize=16000)
@@ -27,16 +27,20 @@ def tokens(text):
     return tuple(lemma(m.group().casefold()) for m in WORDS.finditer(text))
 
 def _labels(characters):
+    from ..entity_identity import labels as identity_labels
+    class LabelIndex(dict):pass
     result={}
     for index,c in enumerate(characters):
-        aliases=c.get('aliases') or []
-        if isinstance(aliases,str):aliases=json.loads(aliases)
-        for label in [c.get('name'),c.get('canonical_name'),*aliases]:
+        for label in identity_labels(c):
             key=tokens(label or '')
             if key:result.setdefault(key,set()).add(index)
-    return {k:next(iter(v)) for k,v in result.items() if len(v)==1}
+    labels=LabelIndex({k:next(iter(v)) for k,v in result.items() if len(v)==1});labels.characters=characters
+    return labels
 
 def _mentions(text,labels):
+    if hasattr(labels,'characters'):
+        from ..entity_identity import mentions
+        return list(dict.fromkeys(index for index,_,_ in mentions(text,labels.characters)))
     words=tokens(text);found={}
     for label,index in labels.items():
         for at in range(len(words)-len(label)+1):
@@ -116,33 +120,34 @@ def plan(analysis,story,target):
     from ..subject_policy import enrich, normalize_scene
     characters=enrich(result.get('characters',[]), result.get('cast_bible'));labels=_labels(characters)
     sentence_starts=[s.start for s in sentences]
-    sentence_context=[];last_actors=[];previous_end=0
+    sentence_context=[];last_actors=[];previous_end=0;identity_issues=[]
     for s in sentences:
-        if '\n\n' in story[previous_end:s.start]:last_actors=[]
-        named=_mentions(s.text,labels)
+        # A paragraph break alone does not change the subject of an explicit pronoun.
+        from ..entity_identity import mentions as identity_mentions, presence_kind
+        issues=[]
+        named_spans=identity_mentions(s.text,characters,issues)
+        for issue in issues:
+            if any(a<=issue['start'] and b>=issue['end'] for _,a,b in named_spans):continue
+            issue.update(start=issue['start']+s.start,end=issue['end']+s.start)
+            if issue not in identity_issues:identity_issues.append(issue)
+        named=list(dict.fromkeys(i for i,_,_ in named_spans))
         physical=[];mentioned=[];depicted=[]
         for index in named:
-            c=characters[index]
-            # Representation and attribution are distinct from a living actor.
-            terms=[c.get('name',''),c.get('canonical_name','')]
-            # Limit this check to the grammatical prefix of this named mention.
-            matches=[re.search(re.escape(term.split()[0][:max(3,len(term.split()[0])-2)]),s.text,re.I) for term in terms if term]
-            hit=next((m for m in matches if m),None)
-            prefix=s.text[max(0,hit.start()-65):hit.start()] if hit else ''
-            if re.search(r'(?:портрет\w*|стату\w*|бюст\w*|изображени\w*|portrait of|statue of)\s+(?:\w+\s+){0,3}$',prefix,re.I):depicted.append(index)
-            elif re.search(r'(?:по словам|как писал\w*|как отмечал\w*|цитат\w*|автор\w*|according to|as written by)\s+(?:\w+\s+){0,2}$',prefix,re.I):mentioned.append(index)
-            else:physical.append(index)
-        pronoun=re.match(r'^\s*(?:(?:потом|затем|но|и|тогда|then|but|and)\s+)?(он|она|he|she)\b',s.text,re.I)
+            kinds={presence_kind(s.text,a,b) for i,a,b in named_spans if i==index}
+            if 'physical' in kinds:physical.append(index)
+            elif 'depicted' in kinds:depicted.append(index)
+            else:mentioned.append(index)
+        pronoun=re.match(r'^\s*(?:(?:потом|затем|но|и|тогда|после этого|на вопросы|снова|then|but|and)\s+)?(он|она|he|she)\b',s.text,re.I)
         if pronoun:
-            from ..named_event_coverage import _morph
-            morph=_morph();gender='femn' if pronoun[1].casefold() in ('она','she') else 'masc'
+            from ..entity_identity import gender as character_gender
+            gender='femn' if pronoun[1].casefold() in ('она','she') else 'masc'
             antecedents=[]
             for index in last_actors:
-                given=WORDS.search(characters[index]['name'])
-                parsed=morph.parse(given.group())[0] if morph and given else None
-                if parsed and parsed.tag.gender==gender:antecedents.append(index)
+                actual=character_gender(characters[index])
+                if actual==gender or (actual is None and len(last_actors)==1):antecedents.append(index)
             if len(antecedents)==1:physical=list(dict.fromkeys([antecedents[0],*physical]))
         if physical:last_actors=list(physical)
+        elif not pronoun:last_actors=[]
         sentence_context.append((physical,mentioned,depicted))
         previous_end=s.stop
     frames=[]
@@ -169,6 +174,7 @@ def plan(analysis,story,target):
             'beat':quote,'heading':'','source_start':a,'source_end':b,'source_quote':quote,
             'source_alignment':'exact_text_frame','analysis_authority':'deepseek-v2',
             'characters':names,'character_ids':cids,'visible_people':len(names),'raw_visible_people':len(names),
+            'population_count_basis':'named_identity_registry',
             'population_policy':'scene_participants' if names else 'source_unspecified','episodic_people':[],
             'mentioned_characters':[characters[i]['name'] for i in mentioned],
             'depicted_people':[characters[i]['name'] for i in depicted],
@@ -185,6 +191,7 @@ def plan(analysis,story,target):
         frames.append(normalize_scene(frame, characters))
     result['scenes']=frames
     info={'version':VERSION,'requested_frames':target,'actual_frames':len(frames),
+          'identity_resolution_issues':identity_issues,
           'semantic_episodes_count':len(episodes),'semantic_episodes':episodes,
           'story_sha256':source_hash,'method':'local_source_partition_after_global_analysis',
           'source_coverage_complete':True,'semantic_accuracy_measured':False,'additional_model_requests':0}

@@ -3,7 +3,7 @@
 Для Flow нужны три части:
 
 1. Запущенный FrameForge на `http://127.0.0.1:8765`.
-2. Расширение Tampermonkey и userscript **FrameForge Flow Bridge (new)** 0.1.82.
+2. Расширение Tampermonkey и userscript **FrameForge Flow Bridge (new)** 0.1.83.
 3. Доступный вашему Google-аккаунту инструмент Flow с адаптером FrameForge и поддержкой `flow-sdk`.
 
 ## Подключение

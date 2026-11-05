@@ -343,7 +343,7 @@ class MediaLibrary:
         # Clean up files if not referenced by another project
         try:
             file_path = self.service.root / item["file_path"]
-            if file_path.exists() and not self.db.one("SELECT id FROM media_library_items WHERE sha256=? AND id!=?", (item["sha256"], item_id)):
+            if file_path.exists() and not self.db.one("SELECT id FROM assets WHERE path=? LIMIT 1",(item["file_path"],)) and not self.db.one("SELECT id FROM media_library_items WHERE sha256=? AND id!=?", (item["sha256"], item_id)):
                 file_path.unlink(missing_ok=True)
             if item.get("thumbnail_path"):
                 (self.service.root / item["thumbnail_path"]).unlink(missing_ok=True)

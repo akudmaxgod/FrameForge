@@ -4,7 +4,7 @@ Flow SDK rejected >4000 JS characters synchronously in controlled requests.
 The full audit contract remains in snapshots. Nothing user-authored is sliced.
 """
 import json,re
-from .visual_style import marker_contract,MARKER_WIRE,MEDICAL_STORY
+from .visual_style import GRITTY_FLOW_STYLE, MARKER_WIRE, MEDICAL_STORY, marker_contract
 from .domain import SOURCE_PEOPLE_UNSPECIFIED
 
 PROVIDER_LIMIT=4000
@@ -13,6 +13,12 @@ MEDICAL_COMPACT=('Preserve source-stated illness, pain, swelling, asymmetry, pal
  'Use only signs/actions stated in this CURRENT source; infer no sign from diagnosis alone, add no injury/blood/procedure, carry no illness into recovery. '
  'For internal illness use stated behavior/expression; invent no cutaway, diagram or anatomical finding.')
 PEOPLE_COMPACT=('Depict people/body parts only when the current source requires them; unnamed source actors need no fixed portrait. Do not substitute an empty room for a bodily state. No invented census, bystanders, identities or illness. Authors/statues/portraits are not living actors.')
+GRITTY_COMPACT = (
+    'Gritty Graphic Novel: 2D variable-weight dark ink, fine face/architecture lines, hatched fur, chainmail and stone. '
+    'Muted ochre, brown, olive, slate and dusty blue, sparse deep red. Matte flat colors, subtle gradients, soft form and hard cast shadows, paper grain and depth. '
+    'Realistic adult 1:6–1:7 proportions, natural hands/drapery, distinct faces. Keep screen/reference identity, face, hairline, age, build and scars. '
+    'Story cast, action and setting only. No photos, 3D, brushwork, cel shading, gloss, captions or speech balloons.'
+)
 
 def units(text):return len(text.encode('utf-16-le'))//2
 
@@ -22,10 +28,28 @@ def pack(prompt):
     body,sep,encoded=prompt.partition(marker)
     body=body.replace(marker_contract(True),MARKER_WIRE).replace(MEDICAL_STORY,MEDICAL_COMPACT)
     body=body.replace(SOURCE_PEOPLE_UNSPECIFIED,PEOPLE_COMPACT)
+    if GRITTY_FLOW_STYLE in body:
+        body = body.replace(GRITTY_FLOW_STYLE, GRITTY_COMPACT, 1)
+        body = body.replace(
+            'Match character illustrative identity and location setting to attached reference images. '
+            'Consistent digital art style, painterly rendering, original fictional characters, no celebrities, not a photograph.',
+            'Match attached character identities and setting.',
+            1,
+        )
     # These are application-owned boilerplate, not arbitrary narration spans.
     replacements=[
       (r'Full-body composition: show every visible character as a complete, anatomically coherent figure with head, torso, two arms, two complete legs and both feet visibly supported by the floor, ground, stairs, deck or other surface\. Never crop, fade, merge or omit the lower body\.',
        'Full body: head/torso, two arms, two hands, two complete legs and both feet supported by the source surface. Never crop, fade, merge or omit the lower body.'),
+      (r'If the frame shows any part of a character below the waist, render the lower body as anatomically complete and physically supported; never create floating torsos, missing legs or fused limbs\.',
+       'If below-waist anatomy is visible, keep it complete and supported. No floating torsos, missing legs or fused limbs.'),
+      (r'Compose a readable cinematic frame with a clear subject, grounded anatomy and deliberate foreground, midground and background separation\.',
+       'Clear subject, grounded anatomy, distinct foreground, midground and background.'),
+      (r'Preserve the exact head and hair appearance from the character reference; do not add unrequested hats, caps or headphones\.',
+       'Match the reference head and hair. No unrequested hats, caps or headphones.'),
+      (r'SPECIES SCALE INVARIANT: use real-world adult dimensions and natural proportions of referenced wildlife; never make animals human-sized, gigantic or miniature\.',
+       'SPECIES SCALE INVARIANT: exact adult wildlife size and natural proportions. No human-sized, giant or miniature animals.'),
+      (r'Do not invent death, injury, blood, a corpse, predation, attack, suffering or any other tragedy\. Show only the source-described living event\.',
+       'Show only the source event. Invent no death, injury, blood, corpse, predation, attack, suffering or tragedy.'),
       (r'Compose a readable hand-drawn scene with a clear subject, simple stick-figure silhouettes and layered illustrated setting\. Match the selected reference identities and setting in the same flat marker drawing language\. Preserve white round heads, simple facial marks and stick limbs; no realistic skin or painted shading\.',
        'Readable layered marker setting. Match attached identities; white round heads, simple facial marks and stick-figure bodies; no realistic skin/shading.'),
       (r'In-world text is allowed only when the source explicitly calls for it, such as period-appropriate writing on a sign, letter, map, document, label or date\.[\s\S]*?Do not invent extra written details\.',

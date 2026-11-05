@@ -105,7 +105,10 @@ def extract_scene_staging_count(scene: Dict[str, Any]) -> Optional[int]:
     shot = str(scene.get('shot') or '').casefold()
     beat = str(scene.get('beat') or '').casefold()
     comp = str(scene.get('composition') or '').casefold()
-    text = f"{shot} {beat} {comp}"
+    # Source narration and reviewed dialogue may count absent relatives or abstract
+    # "both sides". Only explicit framing/composition specifies bodies in the shot.
+    narration = scene.get('source_alignment') == 'exact_text_frame' or bool(scene.get('project_review'))
+    text = f"{shot} {'' if narration else beat} {comp}"
 
     # 0 figures / uninhabited / atmosphere
     if re.search(r'\b(?:empty\s+(?:room|setting|hall|landscape|space|forest|street)|uninhabited|no\s+people|безлюдн\w*|пустая\s+комната|пустое\s+помещение)\b', text):
@@ -286,9 +289,9 @@ def gender_constraint(description, name=''):
     return None
 
 
-def character_requirements(description, name=''):
+def character_requirements(description, name='', entity_type=None):
     """Stable visual requirements used by casting and its approval gate."""
-    if is_nonhuman_character({'name': name, 'description': description}):
+    if is_nonhuman_character({'name': name, 'description': description, 'entity_type': entity_type}):
         return {'gender': None, 'age': None, 'one_person': False, 'entity_type': 'nonhuman'}
     gender = gender_constraint(description, name)
     age = age_constraint(description)
@@ -419,10 +422,6 @@ def scene_has_anonymous_viewpoint_hand(scene):
 
 def is_nonhuman_character(character):
     """Whether a recurring reference is an animal/creature, never a human count."""
-    if isinstance(character, dict):
-        text = ' '.join(str(character.get(key, '')) for key in ('name', 'canonical_name', 'description', 'role'))
-    else:
-        text = str(character or '')
     from .subject_policy import policy
     return policy(character)['entity_type'] in ('animal', 'creature')
 
@@ -430,6 +429,8 @@ def is_nonhuman_character(character):
 def is_literal_animal_reference(character):
     """Animals need literal zoology, unlike a story's actual fictional creatures."""
     if isinstance(character, dict):
+        if character.get('entity_type') == 'creature':
+            return False
         text = ' '.join(str(character.get(key, '')) for key in ('name', 'canonical_name', 'description', 'role'))
     else:
         text = str(character or '')
@@ -437,18 +438,31 @@ def is_literal_animal_reference(character):
 
 
 def nonhuman_scale_instruction(characters, compact=False):
-    """Return a universal physical-scale contract for wildlife reference subjects."""
+    """Keep wildlife at species scale and fictional creatures at story scale."""
+    creatures = [c for c in characters if isinstance(c, dict) and c.get('entity_type') == 'creature']
+    animals = [c for c in characters if is_nonhuman_character(c) and c not in creatures]
+    creature_rule = ''
+    if creatures:
+        names = ', '.join(c['name'] for c in creatures)
+        creature_rule = (
+            f"Creature anatomy for {names}: preserve the reference's non-human body plan, "
+            "including its natural limbs, wings and tail where present. No humanoid body, human face, hands or clothing. "
+            "Use the creature's scale at this point in the story."
+        )
+    if not animals:
+        return creature_rule
     base = ('SPECIES SCALE INVARIANT: use real-world adult dimensions and natural proportions of referenced wildlife; '
             'never make animals human-sized, gigantic or miniature.')
     if compact:
-        return base
-    profiles = [str(item.get('description', '')) for item in characters if isinstance(item, dict)]
+        return ' '.join(filter(None, (creature_rule, base)))
+    profiles = [str(item.get('description', '')) for item in animals if isinstance(item, dict)]
     profile_text = ' '.join(profile for profile in profiles if profile).strip()
-    return ('SPECIES SCALE INVARIANT: use the real-world adult dimensions, mass and proportions of the exact referenced '
+    wildlife_rule = ('SPECIES SCALE INVARIANT: use the real-world adult dimensions, mass and proportions of the exact referenced '
             'species, never dramatic or fantasy scale. Keep the same scale in every frame and show a natural environmental '
             'reference whenever perspective could be misleading. A small animal must remain small beside plants, paths and '
             'human-built objects; a large animal must remain large beside them. Never make wildlife human-sized, gigantic or miniature. '
             f'Biological reference: {profile_text[:900]}')
+    return ' '.join(filter(None, (creature_rule, wildlife_rule)))
 
 
 def scene_mentions_people(scene, known_names=()):
@@ -732,6 +746,7 @@ def resolve_scene_presence_contract(
     )
 
     from .character_selection import resolve_links
+    from .entity_identity import gender as identity_gender, mentions as identity_mentions
     from .subject_policy import enrich, normalize_scene, requires_portrait
     characters = enrich(characters)
     scene, link_errors = resolve_links(scene, characters)
@@ -842,6 +857,8 @@ def resolve_scene_presence_contract(
                 else:
                     gender_pairs.append((c1, c2))
 
+    authoritative_selection = (bool(scene.get('project_review')) or (scene.get('storyboard_frame') or {}).get('version') == 'text-storyboard/3')
+    safely_named = {i for i,_,_ in identity_mentions(quote+' '+beat,active_characters)}
     matched_chars = []
     handled_pair_cids = set()
 
@@ -880,19 +897,8 @@ def resolve_scene_presence_contract(
         if latin_alias:
             aliases.add(latin_alias.casefold())
         in_declared = (cid in declared_char_ids or any(a in {cn.casefold() for cn in declared_char_names} for a in aliases))
-        has_text_mention = False
-        for alias in aliases:
-            if not alias or not stem_ru_word(alias):
-                continue
-            for m in re.finditer(r'\b' + re.escape(stem_ru_word(alias)) + r'[a-zа-яё]*\b', full_text, re.I):
-                prefix = full_text[max(0, m.start() - 25):m.start()].casefold()
-                if any(mod in prefix for mod in _DISTINCT_PERSON_MODIFIERS):
-                    continue
-                has_text_mention = True
-                break
-            if has_text_mention:
-                break
-        if in_declared or has_text_mention:
+        has_text_mention = any(c is active_characters[i] for i in safely_named)
+        if in_declared or (has_text_mention and not authoritative_selection):
             matched_chars.append((c, cid, cname, aliases, in_declared, has_text_mention))
 
     # Pronoun continuity & active verb subject resolution if needed
@@ -900,22 +906,20 @@ def resolve_scene_presence_contract(
     prev_vis_ids = previous_contract.get('visible_character_ids', []) if previous_contract else []
     parent_vis_ids = parent_event.get('visible_character_ids', []) if (parent_event and isinstance(parent_event, dict)) else []
 
-    if not is_atmosphere:
+    if not is_atmosphere and not authoritative_selection:
         # Check active female visual action
-        has_female_pronoun = bool(words & _PRONOUNS_FEMALE)
+        has_female_pronoun = bool(re.search(r'(?:^|[.!?]\s+)(?:(?:но|и|затем|потом)\s+)?(?:она|she)\b',quote_lower or beat_lower))
         has_active_verb = bool(_ACTIVE_VISUAL_VERBS.search(full_text))
         has_female_in_matched = any(
-            str(mc[0].get('canonical_name', '')).casefold().endswith(('а', 'я')) or
-            any(w in str(mc[0].get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена'))
+            identity_gender(mc[0]) == 'femn'
             for mc in matched_chars
         )
-        if (has_female_pronoun or (has_active_verb and not matched_chars)) and not has_female_in_matched:
+        if has_female_pronoun and not has_female_in_matched:
             target_c = None
             female_prev_cands = []
             for p_cid in (prev_vis_ids + parent_vis_ids):
                 cand = char_by_cast_id.get(p_cid) or char_by_id.get(p_cid)
-                if cand and (str(cand.get('canonical_name', '')).casefold().endswith(('а', 'я')) or
-                             any(w in str(cand.get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена'))):
+                if cand and (identity_gender(cand) == 'femn'):
                     if cand not in female_prev_cands:
                         female_prev_cands.append(cand)
             if len(female_prev_cands) == 1:
@@ -928,12 +932,8 @@ def resolve_scene_presence_contract(
                     'details': {'scene_index': pos, 'candidates': [c.get('canonical_name') for c in female_prev_cands]}
                 })
             elif not female_prev_cands:
-                female_cands = [
-                    c for c in active_characters
-                    if str(c.get('canonical_name', '')).casefold().endswith(('а', 'я')) or
-                    any(w in str(c.get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена'))
-                ]
-                if len(female_cands) == 1:
+                female_cands = [c for c in active_characters if identity_gender(c)=='femn']
+                if len(female_cands) == 1 and female_cands[0] is explicit_protagonist:
                     target_c = female_cands[0]
                 elif len(female_cands) > 1 and has_female_pronoun:
                     errors.append({
@@ -943,8 +943,7 @@ def resolve_scene_presence_contract(
                         'details': {'scene_index': pos, 'candidates': [c.get('canonical_name') for c in female_cands]}
                     })
                 elif not female_cands and explicit_protagonist:
-                    if str(explicit_protagonist.get('canonical_name', '')).casefold().endswith(('а', 'я')) or \
-                       any(w in str(explicit_protagonist.get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена')):
+                    if identity_gender(explicit_protagonist) == 'femn':
                         target_c = explicit_protagonist
             if target_c:
                 cid = target_c.get('cast_id') or target_c.get('id') or slugify_id(target_c.get('canonical_name') or target_c.get('name'))
@@ -955,18 +954,17 @@ def resolve_scene_presence_contract(
                     evidence['presence_cues'].append(f'Active subject resolution (she/она) -> {cname}')
 
         # Check active male visual action
-        has_male_pronoun = bool(words & _PRONOUNS_MALE)
+        has_male_pronoun = bool(re.search(r'(?:^|[.!?]\s+)(?:(?:но|и|затем|потом)\s+)?(?:он|he)\b',quote_lower or beat_lower))
         has_male_in_matched = any(
-            not str(mc[0].get('canonical_name', '')).casefold().endswith(('а', 'я')) and
-            not any(w in str(mc[0].get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена'))
+            identity_gender(mc[0]) == 'masc'
             for mc in matched_chars
         )
-        if (has_male_pronoun or (has_active_verb and not matched_chars)) and not has_male_in_matched:
+        if has_male_pronoun and not has_male_in_matched:
             target_c = None
             male_prev_cands = []
             for p_cid in (prev_vis_ids + parent_vis_ids):
                 cand = char_by_cast_id.get(p_cid) or char_by_id.get(p_cid)
-                if cand and not str(cand.get('canonical_name', '')).casefold().endswith(('а', 'я')):
+                if cand and identity_gender(cand) == 'masc':
                     if cand not in male_prev_cands:
                         male_prev_cands.append(cand)
             if len(male_prev_cands) == 1:
@@ -979,11 +977,8 @@ def resolve_scene_presence_contract(
                     'details': {'scene_index': pos, 'candidates': [c.get('canonical_name') for c in male_prev_cands]}
                 })
             elif not male_prev_cands:
-                male_cands = [
-                    c for c in active_characters
-                    if not str(c.get('canonical_name', '')).casefold().endswith(('а', 'я'))
-                ]
-                if len(male_cands) == 1:
+                male_cands = [c for c in active_characters if identity_gender(c)=='masc']
+                if len(male_cands) == 1 and male_cands[0] is explicit_protagonist:
                     target_c = male_cands[0]
                 elif len(male_cands) > 1 and has_male_pronoun:
                     errors.append({
@@ -993,7 +988,7 @@ def resolve_scene_presence_contract(
                         'details': {'scene_index': pos, 'candidates': [c.get('canonical_name') for c in male_cands]}
                     })
                 elif not male_cands and explicit_protagonist:
-                    if not str(explicit_protagonist.get('canonical_name', '')).casefold().endswith(('а', 'я')):
+                    if identity_gender(explicit_protagonist) == 'masc':
                         target_c = explicit_protagonist
             if target_c:
                 cid = target_c.get('cast_id') or target_c.get('id') or slugify_id(target_c.get('canonical_name') or target_c.get('name'))
@@ -1085,7 +1080,7 @@ def resolve_scene_presence_contract(
 
         # 4. Off-screen check (framing exclusion / OTS observer excluded)
         is_offscreen = False
-        is_deepseek_declared = (scene.get('analysis_authority') == 'deepseek-v2' and (cname in declared_char_names or cid in declared_char_ids))
+        is_deepseek_declared = ((scene.get('analysis_authority') == 'deepseek-v2' or authoritative_selection) and (cname in declared_char_names or cid in declared_char_ids))
         if not is_deepseek_declared and _is_character_offscreen_or_mentioned_only(quote, beat, shot, cname):
             direct_action = bool(re.search(
                 r'\b' + re.escape(stem_ru_word(cname.casefold())) + r'\w*\b(?:\W+\w+){0,3}\W+(?:стоит|сидит|ид[её]т|бежит|смотрит|держит|пишет|берет|берёт|вош[её]л|вошла|застыл|застыла|замер|замерла|слуша\w*|плач\w*|улыб\w*|stands|sits|walks|runs|looks|holds|writes|takes|enters|froze|listens?)',
@@ -1168,14 +1163,12 @@ def resolve_scene_presence_contract(
                 if r_lower in _FEMALE_GENERIC_NOUNS or stem_ru_word(r_lower) in {stem_ru_word(w) for w in _FEMALE_GENERIC_NOUNS}:
                     for vc in visible_names:
                         c_obj = name_to_char.get(vc.casefold())
-                        if c_obj and (str(c_obj.get('canonical_name', '')).casefold().endswith(('а', 'я')) or
-                                     any(w in str(c_obj.get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена'))):
+                        if c_obj and (identity_gender(c_obj) == 'femn'):
                             resolved_to_char = vc
                             break
                     if not resolved_to_char and active_characters:
                         for c_obj in active_characters:
-                            if str(c_obj.get('canonical_name', '')).casefold().endswith(('а', 'я')) or \
-                               any(w in str(c_obj.get('description', '')).casefold() for w in ('женщин', 'девушк', 'woman', 'female', 'жена')):
+                            if identity_gender(c_obj) == 'femn':
                                 if c_obj.get('canonical_name') in declared_char_names or c_obj.get('id') in declared_char_ids:
                                     resolved_to_char = c_obj.get('canonical_name')
                                     break
@@ -1183,12 +1176,12 @@ def resolve_scene_presence_contract(
                 elif r_lower in _MALE_GENERIC_NOUNS or stem_ru_word(r_lower) in {stem_ru_word(w) for w in _MALE_GENERIC_NOUNS}:
                     for vc in visible_names:
                         c_obj = name_to_char.get(vc.casefold())
-                        if c_obj and not str(c_obj.get('canonical_name', '')).casefold().endswith(('а', 'я')):
+                        if c_obj and identity_gender(c_obj) == 'masc':
                             resolved_to_char = vc
                             break
                     if not resolved_to_char and active_characters:
                         for c_obj in active_characters:
-                            if not str(c_obj.get('canonical_name', '')).casefold().endswith(('а', 'я')):
+                            if identity_gender(c_obj) == 'masc':
                                 if c_obj.get('canonical_name') in declared_char_names or c_obj.get('id') in declared_char_ids:
                                     resolved_to_char = c_obj.get('canonical_name')
                                     break
@@ -1260,6 +1253,7 @@ def resolve_scene_presence_contract(
     if is_atmosphere:
         visible_people = 0
         visible_ids = []
+        visible_human_ids = []
         visible_names = []
         episodic_roles = []
         episodic_role_ids = []
@@ -1281,7 +1275,11 @@ def resolve_scene_presence_contract(
                     if len(visible_ids) + len(episodic_roles) >= staging_count:
                         break
 
-        visible_people = sum(not is_nonhuman_character(char_by_cast_id.get(cid) or char_by_id.get(cid) or {}) for cid in visible_ids) + len(episodic_roles)
+        visible_human_ids = [
+            cid for cid in visible_ids
+            if not is_nonhuman_character(char_by_cast_id.get(cid) or char_by_id.get(cid) or {})
+        ]
+        visible_people = len(visible_human_ids) + len(episodic_roles)
 
     evidence['episodic'] = list(episodic_roles)
 
@@ -1531,6 +1529,7 @@ def resolve_scene_presence_contract(
 
     return {
         'visible_character_ids': visible_ids,
+        'visible_human_character_ids': visible_human_ids,
         'visible_characters': visible_names,
         'episodic_people': episodic_roles,
         'episodic_role_ids': episodic_role_ids,
@@ -2359,6 +2358,13 @@ def people_count_unresolved(scene):
             or scene.get('subject_state')=='buried_remains'
             or scene.get('source_animals')):
         return False
+    # Local text partitioning resolves recurring identities, not every anonymous
+    # participant in an action. Its registry length is never an exact census.
+    # Read old drafts through this rule too; do not rewrite source revisions.
+    draft = scene.get('storyboard_frame') or {}
+    if (scene.get('population_count_basis') == 'named_identity_registry' or
+            draft.get('interpretation_status') == 'source_bound_draft'):
+        return True
     if scene.get('population_policy')=='source_unspecified':return True
     return (scene.get('analysis_authority')=='deepseek-v2'
             and scene.get('visible_people')==0
@@ -2368,6 +2374,9 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
     from .subject_policy import enrich, normalize_scene, requires_portrait, source_description
     characters = enrich(characters, project.get('cast_bible'))
     scene = normalize_scene(scene, characters)
+    from .panorama_camera import owns_framing, wide_framing
+    panorama_framing = owns_framing(project, scene)
+    camera_project = {**project, 'characters': project.get('characters') or characters}
     subject_text = source_description(scene)
     characters = [c for c in characters if requires_portrait(c)]
     from .mode_policy import allows
@@ -2399,7 +2408,7 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
     profile_type = (channel_profile.get('profile_type') if channel_profile else None) or project.get('profile_type') or ('stickman_story' if channel_profile else '')
     visible_people = scene.get('visible_people')
     if type(visible_people) is not int:
-        visible_people = len(characters) if characters else (1 if scene_mentions_people(scene) else 0)
+        visible_people = sum(not is_nonhuman_character(c) for c in characters) if characters else (1 if scene_mentions_people(scene) else 0)
     # Forgotten Cities may use anonymous historical people even though its UI
     # runs in Objects mode.  Its source-backed people policy is authoritative;
     # do not turn an action scene into an empty landscape solely due to mode.
@@ -2448,7 +2457,7 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
     else:
         lines = []
 
-    from .visual_style import is_marker_style, marker_contract
+    from .visual_style import is_marker_style, marker_contract, is_gritty_style, GRITTY_FLOW_STYLE
     if is_marker_style(style) and not has_people and not unresolved_people:
         style = marker_contract(False)
     lines.extend([f"Visual style: {style}.", f"World/era: {project.get('world', '')}."])
@@ -2498,6 +2507,10 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
         if not character.get('locked'):
             if not allow_unlocked:
                 raise DomainError(f"Сначала LOCK персонажа {character['name']}.", 409)
+            if is_nonhuman_character(character):
+                lines.append(f"Non-human subject {index}: {char_tag}. Appearance and anatomy: {character['description']}. "
+                             "Preserve its species and body plan. No human face, body, hands or clothing.")
+                continue
             clothing_str = f"Clothing: {outfit}." if outfit else f"Fixed clothing: {char_tag} wears the same signature outfit across all scenes."
             lines.append(f"Character {index}: {char_tag}. Appearance: {character['description']}. {clothing_str}")
             continue
@@ -2509,7 +2522,13 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
             lines.append(f"Character {index}: {char_tag}. Appearance: {character['description']}. {clothing_str}")
             continue
         references.append({'asset_id': refs['portrait'], 'character_id': character['id'],
-                           'revision': character['revision'], 'role': 'portrait'})
+                           'revision': character['revision'], 'role': 'portrait',
+                           'entity_type': character['entity_type']})
+        if is_nonhuman_character(character):
+            lines.append(f"Reference image {index}: {char_tag}. Preserve this non-human subject's species, "
+                         f"body plan, markings and distinguishing features: {character['description']}. "
+                         "No human face, body, hands, wardrobe or gear.")
+            continue
         if subject_mode:
             lines.append(f"Reference image {index}: {character['name']}. Preserve this object's defining form, "
                          f"materials, structure and recognisable details: {character['description']}. "
@@ -2579,19 +2598,20 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
             if not a.startswith('@') and a in beat:
                 beat = re.sub(rf'(?<!@)\b{re.escape(a)}\b', f'@{name}', beat)
     if has_people and scene.get('population_policy') not in ('inhabited_city', 'source_people', 'source_group', 'source_reviewed_participants'):
-        char_tags = [f"@{c['name']}" if not c['name'].startswith('@') else c['name'] for c in characters] if characters else []
+        char_tags = [f"@{c['name']}" if not c['name'].startswith('@') else c['name']
+                     for c in characters if not is_nonhuman_character(c)]
         episodic_roles = scene.get('episodic_people') or scene.get('background_roles') or extract_scene_episodic_roles(scene, [c['name'] for c in characters if isinstance(c, dict)])
         if char_tags:
             lines.append(f"Featuring recurring character(s) in this shot: {', '.join(char_tags)}. "
                          "Every named character must precisely retain their established facial features, hairstyle, head appearance, build, and fixed wardrobe. "
                          "Strict headwear consistency: if bareheaded in reference, strictly keep hair uncovered and do not add hats, caps, peaked pilot caps, helmets, or headwear.")
-        if char_tags and episodic_roles:
+        if not unresolved_people and char_tags and episodic_roles:
             lines.append(f"Strict person contract: exactly {visible_people} people present: {', '.join(char_tags)} and {', '.join(episodic_roles)}. "
                          "Strictly forbid adding any extra people, bystanders, crowd, travelers, background figures, or uninvited faces.")
-        elif char_tags:
+        elif not unresolved_people and char_tags:
             lines.append(f"Strict person contract: exactly {visible_people} person(s) present ({', '.join(char_tags)}). "
                          "Strictly forbid adding any extra people, bystanders, crowd, travelers, background figures, or uninvited faces.")
-        elif episodic_roles:
+        elif not unresolved_people and episodic_roles:
             lines.append(f"Strict person contract: exactly {visible_people} person(s) present ({', '.join(episodic_roles)}). "
                          "Strictly forbid adding any extra people, bystanders, crowd, travelers, background figures, or uninvited faces.")
 
@@ -2634,7 +2654,8 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
                   'interface elements, logos, watermarks, signs, labels, book pages, documents, maps or writing anywhere in the image. '
                   'Any required paper or sign must be blank, turned away or unreadably out of focus.',
                   f"Event: {beat}.", f"Location: {scene.get('location', '')}.",
-                  f"Time: {scene.get('time', '')}. Shot: {scene.get('shot', 'cinematic wide shot')}.",
+                  (f"Time: {scene.get('time', '')}." if panorama_framing else
+                   f"Time: {scene.get('time', '')}. Shot: {scene.get('shot', 'cinematic wide shot')}."),
                   f"Current continuity: {scene.get('continuity_before', '')}.",
                   'Follow the event description only; never render any source prose, quotation or narration as text.'])
     forgotten_contract = scene.get('forgotten_cities_prompt_contract')
@@ -2659,7 +2680,9 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
                          'Every visible person has one head, two arms, two hands, two legs and two feet; complete '
                          'natural limbs and hands, no duplicate body parts, no fused limbs, no extra fingers, no '
                          'third arms, no third legs, no extra hands, no extra feet, no malformed anatomy.')
-        if scene.get('population_policy') == 'inhabited_city':
+        if unresolved_people:
+            lines.append(SOURCE_PEOPLE_UNSPECIFIED)
+        elif scene.get('population_policy') == 'inhabited_city':
             lines.append('An inhabited ancient city with anonymous residents engaged in ordinary daily life. '
                          'Use a natural number of residents appropriate to the view, without an exact headcount. '
                          'Keep the city and the narrated activity as the main subject; no solo portrait.')
@@ -2701,6 +2724,8 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
                      'Maintain clean uniform line thickness, consistent cartoon proportions, and pure minimalist background.')
         if channel_version and channel_version.get('negative_prompt'):
             lines.append(f"Channel negative constraints: {channel_version['negative_prompt']}.")
+    elif is_gritty_style(project.get('style')):
+        lines.append('Precise 2D ink and hatching, realistic proportions, matte desaturated colors; no painterly brushwork, photographic rendering, cel shading, captions or speech balloons.')
     elif 'graphic novel comic art' in project.get('style', '').casefold():
         lines.append('Comic art must contain illustration only: absolutely no speech bubbles, dialogue balloons, '
                      'captions, narration boxes, lettering, readable words, symbols standing in for text or signs.')
@@ -2721,7 +2746,7 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
 
     from .frame_composition import instruction as camera_instruction
     from .camera_profiles import instruction as project_camera
-    camera=camera_instruction(scene) or project_camera(project, scene)
+    camera=camera_instruction(scene) or project_camera(camera_project, scene)
     if camera:prompt+='\n'+camera
 
     compiled_style_contract = ""
@@ -2830,6 +2855,9 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
     from .subject_policy import enrich, normalize_scene, requires_portrait, source_description
     characters = enrich(characters, project.get('cast_bible'))
     scene = normalize_scene(scene, characters)
+    from .panorama_camera import owns_framing, wide_framing
+    panorama_framing = owns_framing(project, scene)
+    camera_project = {**project, 'characters': project.get('characters') or characters}
     subject_text = source_description(scene)
     characters = [c for c in characters if requires_portrait(c)]
     from .mode_policy import allows
@@ -2840,7 +2868,9 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
     Visual references are attached as image files, so we omit ComfyUI boilerplate, negative prompts,
     and long constraint lists that trigger Google Flow API errors."""
     parts = [subject_text] if subject_text else []
-    literal_animal_present = any(is_literal_animal_reference(character) for character in characters)
+    literal_animal_present = any(is_literal_animal_reference(character) for character in characters) and not any(
+        isinstance(character, dict) and character.get('entity_type') == 'creature' for character in characters
+    )
 
     channel_profile = (channel_context or {}).get('profile') if channel_context else None
     channel_version = (channel_context or {}).get('version') if channel_context else None
@@ -2877,7 +2907,7 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
         val = re.sub(r'\s+', ' ', val).strip(' ,;:-')
         return val
 
-    from .visual_style import is_marker_style, marker_contract
+    from .visual_style import is_marker_style, marker_contract, is_gritty_style, GRITTY_FLOW_STYLE
     marker_style = is_marker_style(project.get('style')) and not (channel_version and channel_version.get('style_prompt'))
     is_illustration = marker_style
     # 1. Visual style
@@ -2890,6 +2920,8 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
             primary_style = style.split(',')[0].strip() if ',' in style else style[:60].strip()
             if marker_style:
                 parts.append(marker_contract(bool(scene.get('visible_people') or characters) or people_count_unresolved(scene)))
+            elif is_gritty_style(style):
+                parts.append(GRITTY_FLOW_STYLE)
             elif is_illustration:
                 parts.append(f"{primary_style}, artistic digital painting illustration")
             else:
@@ -2934,7 +2966,7 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
     # 4. Featured characters & visible people count
     visible_people = scene.get('visible_people')
     if type(visible_people) is not int:
-        visible_people = len(characters) if characters else (1 if scene_mentions_people(scene) else 0)
+        visible_people = sum(not is_nonhuman_character(c) for c in characters) if characters else (1 if scene_mentions_people(scene) else 0)
 
     char_names = []
     human_char_names = []
@@ -3096,7 +3128,7 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
     emotion = (scene.get('emotion') or '').strip()
     time_of_day = (scene.get('time') or '').strip()
     mood_parts = []
-    if shot:
+    if shot and not panorama_framing:
         mood_parts.append(shot)
     if time_of_day:
         mood_parts.append(f"{time_of_day} light")
@@ -3121,9 +3153,10 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
         r'\b(?:ид[её]т|стоит|поднимается|спускается|бежит|подходит|входит|выходит|'
         r'лестниц\w*|балкон\w*|причал\w*)\b'
     )
-    if visible_people and re.search(full_body_cues, framing_text):
+    full_body_requested = (wide_framing(camera_project, scene) if panorama_framing else bool(re.search(full_body_cues, framing_text)))
+    if visible_people and full_body_requested:
         parts.append("Full-body composition: show every visible character as a complete, anatomically coherent figure with head, torso, two arms, two complete legs and both feet visibly supported by the floor, ground, stairs, deck or other surface. Never crop, fade, merge or omit the lower body")
-    elif visible_people:
+    elif visible_people and not panorama_framing:
         parts.append("Keep each stick figure continuous and grounded: both simplified legs connect to its clothed torso, with simple feet touching their support" if marker_style else "If the frame shows any part of a character below the waist, render the lower body as anatomically complete and physically supported; never create floating torsos, missing legs or fused limbs")
 
     continuity_before = (scene.get('continuity_before') or '').strip()
@@ -3162,7 +3195,7 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
 
     from .frame_composition import instruction as camera_instruction
     from .camera_profiles import instruction as project_camera
-    camera=camera_instruction(scene) or project_camera(project, scene)
+    camera=camera_instruction(scene) or project_camera(camera_project, scene)
     if camera:parts.append(camera)
     prompt = '. '.join(p for p in parts if p)
     prompt = re.sub(r'\.+', '.', prompt).strip()
@@ -3462,12 +3495,12 @@ def validate_project_preflight(project_or_data: Dict[str, Any], story: Optional[
                 'details': {'scene_index': idx + 1, 'conflict': list(vis_ids_set & depicted_ids_set)}
             })
 
-        expected_vp = len(vis_ids_set) + len(episodic_ids_set)
+        expected_vp = len(set(contract['visible_human_character_ids'])) + len(episodic_ids_set)
         if contract['visible_people'] != expected_vp and not (contract.get('shot_type') == SHOT_TYPE_ATMOSPHERE):
             errors.append({
                 'code': 'presence_count_invariant_violation',
                 'scene_index': idx + 1,
-                'message': f'Кадр {idx + 1}: visible_people ({contract["visible_people"]}) не совпадает с суммой видимых персонажей и эпизодических ролей ({expected_vp}).',
+                'message': f'Кадр {idx + 1}: visible_people ({contract["visible_people"]}) не совпадает с числом видимых людей и эпизодических ролей ({expected_vp}).',
                 'details': {'scene_index': idx + 1, 'visible_people': contract['visible_people'], 'expected': expected_vp}
             })
 

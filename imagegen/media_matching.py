@@ -296,6 +296,83 @@ def evaluate_candidate_alignment(
         }
 
 
+def extract_video_keyframes(
+    video_path: str,
+    num_frames: int = 3,
+    start_ms: float = 0.0,
+    end_ms: Optional[float] = None
+) -> List[str]:
+    """
+    Extracts representative keyframe images across the duration of a video file or target interval.
+    Returns list of paths to temporary JPEG images sampled across the continuous interval.
+    """
+    import tempfile
+    import time
+    try:
+        import cv2
+        from PIL import Image
+    except ImportError:
+        return []
+
+    vp = Path(video_path)
+    if not vp.exists() or not vp.is_file():
+        return []
+
+    cap = cv2.VideoCapture(str(vp))
+    if not cap.isOpened():
+        return []
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total_duration_ms = (total_frames / fps) * 1000.0
+
+        actual_start_ms = max(0.0, float(start_ms or 0.0))
+        if end_ms is not None and float(end_ms) > actual_start_ms:
+            actual_end_ms = min(total_duration_ms, float(end_ms))
+        else:
+            actual_end_ms = total_duration_ms
+
+        dur_ms = max(50.0, actual_end_ms - actual_start_ms)
+
+        if num_frames == 1:
+            sample_times = [actual_start_ms + 0.5 * dur_ms]
+        else:
+            sample_times = [
+                actual_start_ms + 0.1 * dur_ms,
+                actual_start_ms + 0.5 * dur_ms,
+                actual_start_ms + 0.9 * dur_ms
+            ]
+
+        tmp_dir = Path(tempfile.gettempdir()) / "frameforge_video_keyframes"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        extracted = []
+        for i, t_ms in enumerate(sample_times):
+            target_frame = int((t_ms / 1000.0) * fps)
+            target_frame = max(0, min(target_frame, total_frames - 1))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                cap.set(cv2.CAP_PROP_POS_MSEC, t_ms)
+                ret, frame = cap.read()
+            if ret and frame is not None:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb)
+                fpath = tmp_dir / f"kf_{int(time.time()*1000)}_{i}_{int(t_ms)}.jpg"
+                img.save(fpath, format="JPEG", quality=85)
+                extracted.append(str(fpath))
+
+        while len(extracted) < num_frames and extracted:
+            extracted.append(extracted[-1])
+
+        return extracted
+    finally:
+        cap.release()
+
+
 def verify_candidate_with_qwen(service, phrase, segment, keyframe_path=None):
     from .media_analysis import LlamaServerManager
     manager = LlamaServerManager.get_manager(service)
@@ -336,9 +413,32 @@ def _verify_candidate_with_qwen(
     summary = segment.get("analysis_summary", "")
     actions = segment.get("actions", [])
     objects = segment.get("objects", [])
+    mandatory = segment.get("mandatory_details") or []
+    forbidden = segment.get("forbidden_substitutions") or []
+    role = segment.get("requested_role") or "exact"
+    entities = segment.get("subject_entities") or []
+
+    constraints_lines = []
+    if role:
+        constraints_lines.append(f"- Требуемая роль материала: {role}")
+    if entities:
+        ent_str = ", ".join(entities) if isinstance(entities, list) else str(entities)
+        constraints_lines.append(f"- Упомянутые сущности: {ent_str}")
+    if mandatory:
+        mand_str = ", ".join(mandatory) if isinstance(mandatory, list) else str(mandatory)
+        constraints_lines.append(f"- Обязательные детали/симптомы: {mand_str}")
+    if forbidden:
+        forb_str = ", ".join(forbidden) if isinstance(forbidden, list) else str(forbidden)
+        constraints_lines.append(f"- Запрещённые подмены: {forb_str}")
+
+    constraints_text = "\n".join(constraints_lines)
+    if constraints_text:
+        constraints_block = f"\nКритерии и ограничения:\n{constraints_text}\n"
+    else:
+        constraints_block = ""
 
     user_text = (
-        f"Фраза сценария:\n«{phrase}»\n\n"
+        f"Фраза сценария:\n«{phrase}»\n{constraints_block}\n"
         f"Описание кандидата из библиотеки:\n"
         f"- Главный объект: {dominant}\n"
         f"- Действия в кадре: {actions}\n"
@@ -346,12 +446,22 @@ def _verify_candidate_with_qwen(
         f"- Краткое описание: {summary}\n"
     )
 
-    paths=json.loads(segment.get('keyframe_paths_json') or '[]') or ([keyframe_path] if keyframe_path else [])
-    user_content=[{'type':'text','text':user_text+'\nПроверь соответствие всей непрерывной вставки, а не одного удачного кадра. Ниже кадры в начале, середине и конце выбранного интервала.'}]
-    if not paths:raise ValueError('Нет кадров выбранного интервала для визуальной проверки.')
+    raw_paths = json.loads(segment.get('keyframe_paths_json') or '[]') or ([keyframe_path] if keyframe_path else [])
+    paths = []
+    for p in raw_paths:
+        plow = str(p).lower()
+        if plow.endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
+            ext_frames = extract_video_keyframes(p)
+            paths.extend(ext_frames)
+        else:
+            paths.append(p)
+
+    user_content = [{'type': 'text', 'text': user_text + '\nПроверь соответствие всей непрерывной вставки, а не одного удачного кадра. Ниже кадры в начале, середине и конце выбранного интервала.'}]
+    if not paths:
+        raise ValueError('Нет кадров выбранного интервала для визуальной проверки.')
     for path in paths[:3]:
-        uri=service.media_analysis._prepare_image_payload(path)
-        user_content.append({'type':'image_url','image_url':{'url':uri}})
+        uri = service.media_analysis._prepare_image_payload(path)
+        user_content.append({'type': 'image_url', 'image_url': {'url': uri}})
 
     payload = {
         "model": "qwen3-vl",

@@ -4,6 +4,7 @@ No generated media or scene data are written here. Reports are advisory state;
 the original focus/source validators remain the acceptance authority.
 """
 import copy
+import re
 import hashlib
 import json
 import os

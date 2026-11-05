@@ -123,8 +123,8 @@ def marker_scene_review(snapshot, image):
         return False
     count = marker_head_count(image)
     expected = int(snapshot.get('expected_people',0))
-    if count > expected and (expected or snapshot.get('uninhabited')):
-        raise DomainError('Количество нарисованных персонажей превышает состав сцены. Кадр не принят.',422)
+    from .composition_review import record_population_review
+    record_population_review(snapshot, {'faces': count}, method='marker_head_contours')
     snapshot['identity_review'] = {'status':'unverified', 'method':'manual_visual_review',
         'reason':'Для рисованного стиля проверьте сходство персонажей с эталонами визуально.'}
     return True

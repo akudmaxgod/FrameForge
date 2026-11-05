@@ -422,7 +422,7 @@ const CAMERA_MODES = [
     name: 'Панорама',
     icon: '⛰️',
     hasNewBadge: false,
-    description: 'Масштаб и мир. Широкие и сверхширокие планы доминируют, с крупными якорями для эмоциональной связи. Приключения, фэнтези, пейзажи.',
+    description: 'Масштаб и мир. Общие планы чередуются с диалогами, реакциями и деталями по действию и соседним кадрам. Ракурсы подчёркивают пространство; ручная композиция имеет приоритет.',
     bg: 'linear-gradient(rgba(15, 23, 42, 0.65), rgba(15, 23, 42, 0.95)), radial-gradient(circle at 80% 20%, rgba(16, 185, 129, 0.35), transparent 60%)'
   },
   {
@@ -1369,12 +1369,13 @@ async function autoAcceptReadyReferences(){
   await refresh(true);
 }
 
-function sceneBatchBlockReason(){
+function sceneBatchBlockReason({allowMissingReferences=false}={}){
   const errors=project.preflight?.errors||[];
   const analysisErrors=[...new Map(errors.filter(item=>item.code!=='missing_required_reference').map(item=>[item.message||item.code,item])).values()];
   if(project.preflight?.ok===false&&analysisErrors.length)
     return 'Генерация заблокирована: '+analysisErrors.slice(0,3).map(item=>item.message||item.code).join('; ');
 
+  if(allowMissingReferences)return null;
   const resources=project.reference_requirements||[];
   const missing=[];
 
@@ -1436,6 +1437,22 @@ function sceneBatchBlockReason(){
 
 let sceneBatchStarting=false;
 
+function flowPortraitPlan(){
+  const missing=[],ready=[];
+  for(const subject of referenceSubjects()){
+    const saved=subject.references?.portrait;
+    if(subject.locked&&saved)continue;
+    const variants=(project.generations||[]).filter(g=>
+      g.character_id===subject.id&&g.character_revision===subject.revision&&
+      g.state==='succeeded'&&g.asset_id&&!g.snapshot?.wardrobe_key);
+    const selected=picked.get(subject.id)?.portrait;
+    const asset=variants.find(g=>g.asset_id===selected)?.asset_id||variants.at(-1)?.asset_id||saved;
+    if(asset)ready.push({subject,asset});
+    else missing.push(subject);
+  }
+  return {missing,ready};
+}
+
 async function waitForFlowSceneCommand(pid,commandId){
   let last=null;
   for(let attempt=0;attempt<30;attempt++){
@@ -1462,7 +1479,8 @@ async function startAllScenes(){
     if(isFlow){
       const bridge=await api('/bridge/v1/status');sameProject();
       if(!bridge.connected)throw Error('Мост Flow не подключён. Откройте FrameForge Bridge и нажмите «Проверить связь», затем повторите запуск.');
-      if(bridge.running||bridge.pending_command==='start'){
+      if(!bridge.staged_image_batch)throw Error('Обновите FrameForge Flow Bridge до 0.1.82 и перезагрузите вкладку Flow.');
+      if(bridge.running||bridge.pending_command==='start'||bridge.active_image_requests){
         if(bridge.project_id!==pid)throw Error('Flow занят другим проектом. Дождитесь завершения или поставьте его на паузу.');
         showNotice('Генерация этого проекта уже запущена в Flow.');return;
       }
@@ -1472,28 +1490,46 @@ async function startAllScenes(){
         const check=await api('/bridge/v1/command',{action:'check',project_id:pid});
         await waitForFlowSceneCommand(pid,check.command_id);sameProject();
       }
-    }
-    await autoAcceptReadyReferences();sameProject();
-    // A ready but previously unlocked reference must be reflected in preflight.
-    await refresh(true);sameProject();
-    const reason=sceneBatchBlockReason();if(reason)throw Error(reason);
-    if(isFlow){
-      // Flow reads the source-bound manifest and persists each returned image.
-      // A local GPU batch is neither required nor the owner of these requests.
-      const command=await api('/bridge/v1/command',{action:'start',project_id:pid,images_only:true});
-      showNotice('Команда отправлена в Flow. Ожидаю подтверждение запуска…');
+      await refresh(true);sameProject();
+      const {missing,ready}=flowPortraitPlan();
+      const stage=missing.length?'portraits':'scenes';
+      if(stage==='scenes'){
+        const reason=sceneBatchBlockReason({allowMissingReferences:true});if(reason)throw Error(reason);
+        if(ready.length){
+          if(!confirm(`Портреты проверены и подходят? Закрепить ${ready.length} и запустить сцены во Flow?`))return;
+          for(const {subject,asset} of ready){
+            sameProject();
+            await api(`/characters/${subject.id}/lock`,{
+              revision:subject.revision,references:{portrait:asset},review:{one_person_confirmed:true}
+            });
+          }
+          await refresh(true);sameProject();
+        }
+      }
+      const command=await api('/bridge/v1/command',{action:'start',project_id:pid,images_only:true,batch_stage:stage});
+      showNotice(stage==='portraits'?'Flow: запускаю недостающие портреты…':'Flow: запускаю сцены…');
       const status=await waitForFlowSceneCommand(pid,command.command_id);
       if(status.running||status.active_image_requests>0)
-        showNotice(`Flow подтвердил запуск изображений: ${count} кадров в плане.`);
+        showNotice(stage==='portraits'
+          ? `Flow начал подготовку портретов: ${missing.length}. После проверки нажмите эту кнопку снова.`
+          : `Flow подтвердил запуск изображений: ${count} кадров в плане.`);
+      else if(stage==='portraits'&&status.status?.startsWith('Портреты готовы к проверке'))
+        showNotice(status.status);
       else if(status.status)
         throw Error(`Flow принял команду и остановился: ${status.status}`);
       else showNotice('Flow принял команду. Состояние появится в панели моста.');
     }else{
+      await autoAcceptReadyReferences();sameProject();
+      await refresh(true);sameProject();
+      const reason=sceneBatchBlockReason();if(reason)throw Error(reason);
       await action(`/projects/${pid}/batch`,{idempotency_key:crypto.randomUUID()},'Все сцены истории поставлены в очередь');
     }
   }finally{
     sceneBatchStarting=false;
-    if(current===pid)render();
+    if(current===pid){
+      try{await refresh(true);}catch(error){console.warn('Не удалось обновить состояние генерации:',error);}
+      render();
+    }
   }
 }
 
@@ -1507,9 +1543,9 @@ function renderBatchActionBar(){
   const count = project.scenes.length;
   const completed = project.scenes.filter(s => sceneDisplayGeneration(s)?.asset_id).length;
 
-  const readyRefs = unconfirmedReadyReferences();
-  const readyCount = readyRefs.length;
   const isFlow = currentSettings?.image_backend === 'flow';
+  const portraits = isFlow ? flowPortraitPlan() : null;
+  const readyCount = portraits ? portraits.ready.length : unconfirmedReadyReferences().length;
 
   const title = el('div', undefined, 'batch-action-title');
   const badge = el('span', isFlow ? 'FLOW' : 'КАДРЫ', 'batch-action-badge' + (isFlow ? ' flow-badge' : ''));
@@ -1517,20 +1553,20 @@ function renderBatchActionBar(){
   left.append(title);
 
   const sub = el('div', undefined, 'batch-action-subtitle muted');
-  if(readyCount > 0){
-    sub.textContent = isFlow
-      ? `Вся история: ${count} сцен (100% сюжета) · Готовые эталоны (${readyCount}) будут приняты, и все ${count} сцен уйдут в Google Flow`
-      : `Вся история: ${count} сцен (100% сюжета) · Готовые эталоны (${readyCount}) будут приняты автоматически`;
+  if(portraits?.missing.length){
+    sub.textContent = `Шаг 1 из 2 · Нужно создать портреты: ${portraits.missing.length}. Сцены запускаются после проверки.`;
+  } else if(portraits?.ready.length){
+    sub.textContent = `Шаг 2 из 2 · Проверьте портреты (${readyCount}) в разделе «Персонажи». Затем подтвердите их и запустите сцены.`;
+  } else if(!isFlow&&readyCount>0){
+    sub.textContent = `Вся история: ${count} сцен (100% сюжета) · Готовые эталоны (${readyCount}) будут приняты автоматически`;
   } else {
-    sub.textContent = isFlow
-      ? `Вся история: ${count} сцен (100% сюжета) · Готово ${completed} из ${count} · Отправка всех кадров в Google Flow`
-      : `Вся история: ${count} сцен (100% сюжета) · Готово ${completed} из ${count}`;
+    sub.textContent = `Вся история: ${count} сцен (100% сюжета) · Готово ${completed} из ${count}`;
   }
   left.append(sub);
 
   const right = el('div', undefined, 'batch-action-buttons');
 
-  if(readyCount > 0){
+  if(!isFlow&&readyCount>0){
     const acceptBtn = button(`✓ Принять эталоны (${readyCount})`, async () => {
       await autoAcceptReadyReferences();
       showNotice(`Все готовые эталоны (${readyCount}) успешно зафиксированы!`);
@@ -1539,7 +1575,10 @@ function renderBatchActionBar(){
     right.append(acceptBtn);
   }
 
-  const generateBtnText = isFlow ? '▶ Сгенерировать все сцены во Flow' : 'Сгенерировать все кадры';
+  let generateBtnText = 'Сгенерировать все кадры';
+  if(portraits?.missing.length)generateBtnText='▶ Сгенерировать портреты во Flow';
+  else if(portraits?.ready.length)generateBtnText='✓ Подтвердить портреты и запустить сцены';
+  else if(isFlow)generateBtnText='▶ Сгенерировать все сцены во Flow';
   const generateBtn = button(generateBtnText, startAllScenes, 'primary batch-generate-btn', 'generate-scenes');
   generateBtn.disabled=sceneBatchStarting;
   right.append(generateBtn);
@@ -2021,6 +2060,14 @@ function renderSceneCard(scene){
     body.append(el('p', 'Просмотрите изображение перед ручным утверждением.', 'scene-stale-warning'));
   }
 
+  const identityReview=display?.snapshot?.identity_review;
+  if(identityReview?.status==='needs_review'||identityReview?.status==='unverified'){
+    body.append(el('p',identityReview.reason,'scene-stale-warning'));
+  }
+  const compositionReview=display?.snapshot?.composition_review;
+  if(compositionReview?.status==='needs_review'||compositionReview?.status==='unverified'){
+    body.append(el('p',compositionReview.reason,'scene-stale-warning'));
+  }
   const animData = scene.data?.animation || {};
   const animInfo = renderCompactAnimationControl(scene, display, animData);
   animationControl = animInfo;

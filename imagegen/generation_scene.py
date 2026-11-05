@@ -231,7 +231,10 @@ def compile_wire(project, scene, references=()):
         else:
             lines.append('Attached references preserve the selected setting/identity; narration controls era, action and state. Do not import unrelated people or ruined state.')
     from .frame_composition import instruction as camera_instruction
+    from .camera_profiles import instruction as project_camera
     framing = camera_instruction(scene, compact=True)
+    if not framing and project.get('camera_mode') == 'panorama':
+        framing = project_camera(project, scene)
     if framing:
         lines.append(framing)
     if scene.get('manual_prompt'):

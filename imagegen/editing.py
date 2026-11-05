@@ -24,6 +24,9 @@ def normalize(document):
     """Milliseconds, unquantized clock; black fades occupy half of each join."""
     from .montage_layers import effective_clip
     clips = [effective_clip(c) for c in document['clips'] if not c.get('excluded')]
+    if document.get('footage_muted'):
+        for clip in clips:
+            if clip.get('source_kind') == 'footage': clip['muted'] = True
     joins = {(t['left'], t['right']): t for t in document.get('transitions', [])}
     for c in clips:
         c['duration_ms'] = (c['trim_out_ms'] - c['trim_in_ms']) / c.get('playback_rate', 1) + c.get('hold_last_ms',0)
@@ -95,6 +98,9 @@ class Editing:
         document = json.loads(row['document_json']) if row else {'schema_version': 1, 'clips': [], 'transitions': [], 'audio_tracks': [], 'source_audio': False, 'export_settings': {'width':1920,'height':1080,'fps':24}}
         export = self.db.one('SELECT id FROM edit_exports WHERE project_id=? ORDER BY created_at DESC LIMIT 1', (project_id,))
         return {'revision': row['revision'] if row else 0, 'document': document, 'timeline': normalize(document), 'sources': self.sources(project_id, document), 'last_export_id': (export or {}).get('id')}
+
+    def get_document(self, project_id):
+        return self.get(project_id)['document']
 
     def sources(self, project_id, document):
         # Match detail's scene checks without building the complete story audit,
@@ -259,6 +265,7 @@ class Editing:
             number(a.get('volume', 1), 0, 1)
             a['enabled'] = bool(a.get('enabled', True))
         doc['source_audio'] = bool(doc.get('source_audio'))
+        if 'footage_muted' in doc: doc['footage_muted'] = bool(doc['footage_muted'])
         if doc.get('timing_mode') not in (None,'voice_fit'):
             raise DomainError('Неизвестный режим времени монтажа.')
         if doc.get('voice_fit'):
@@ -332,6 +339,8 @@ class Editing:
         self.project(project_id)
         source = Path(source)
         title = Path(filename.replace('\\', '/')).name[:300]
+        if Path(title).suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp'):
+            return self.import_image_file(project_id, source, title)
         if source.stat().st_size > 512_000_000 or Path(title).suffix.lower() not in ('.mp4', '.mov', '.m4v', '.mkv', '.webm'):
             raise DomainError('Выберите MP4, MOV, M4V, MKV или WebM не больше 512 МБ.', 413)
         duration = probe(source, 'video')
@@ -378,6 +387,50 @@ class Editing:
             raise
         clip = {'edit_clip_id':uid(), 'source_kind':'footage', 'scene_id':None, 'title':title, 'source_video_asset_id':aid, 'source_image_asset_id':thumb, 'source_scene_revision':0, 'source_duration_ms':duration, 'trim_in_ms':0, 'trim_out_ms':duration, 'excluded':False, 'muted':True, 'volume':1}
         return {'clip':clip, 'asset_id':aid, 'duration_ms':duration}
+
+    def import_image_file(self, project_id, source, filename):
+        """Technical image validation only; manual placement never calls a model."""
+        from PIL import Image, ImageOps
+        self.project(project_id)
+        source = Path(source)
+        if not 0 < source.stat().st_size <= 25_000_000:
+            raise DomainError('Изображение должно быть не больше 25 МБ.', 413)
+        aid, gid = uid(), uid()
+        relative = Path('assets')/project_id/(aid+'.png')
+        target = self.service.root/relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with Image.open(source) as image:
+                if image.width*image.height > 40_000_000:
+                    raise DomainError('Изображение слишком большое: максимум 40 мегапикселей.')
+                image.load()
+                image = ImageOps.exif_transpose(image).convert('RGB')
+                width, height = image.size
+                image.save(target, format='PNG')
+            with target.open('rb') as raw:
+                sha = hashlib.file_digest(raw, 'sha256').hexdigest()
+            with self.db.transaction() as conn:
+                conn.execute("INSERT INTO generations(id,project_id,purpose,state,snapshot,seed,asset_id,created_at) VALUES(?,?,'edit_image','succeeded','{}',0,?,?)", (gid,project_id,aid,now()))
+                conn.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?)', (aid,project_id,gid,str(relative),sha,width,height,target.stat().st_size))
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        clip = {'edit_clip_id':uid(),'source_kind':'footage','scene_id':None,'title':filename,
+                'media_type':'image','source_image_asset_id':aid,'source_video_asset_id':None,
+                'source_scene_revision':0,'source_duration_ms':86400000,'trim_in_ms':0,
+                'trim_out_ms':5000,'excluded':False,'muted':True,'volume':1,'framing':'fit'}
+        return {'clip':clip,'asset_id':aid,'duration_ms':5000}
+
+    def library_clip(self, project_id, item_id):
+        """Manual clip from the project-owned original, independently of Qwen status."""
+        item = self.service.media_library.get_item(project_id, item_id)
+        source = (self.service.root/item['file_path']).resolve()
+        if not source.is_relative_to(self.service.root.resolve()) or not source.is_file():
+            raise DomainError('Исходный файл медиатеки недоступен.', 404)
+        result = (self.import_image_file(project_id, source, item['original_name']) if item['media_type']=='image' else self.import_video_file(project_id, source, item['original_name']))
+        result['clip']['media_library_item_id'] = item_id
+        result['clip']['placement_mode'] = 'manual'
+        return result
 
     def audio(self, project_id, data):
         self.project(project_id)

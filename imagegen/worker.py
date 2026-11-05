@@ -899,7 +899,9 @@ class Worker:
             except Exception as error:
                 raise DetectorUnavailableError('Не удалось загрузить локальную модель детектора.') from error
         try:
-            return len(detector(image, device='cpu', imgsz=640, conf=confidence, verbose=False)[0].boxes)
+            from .detector_process import count_instances
+            result = detector(image, device='cpu', imgsz=640, conf=confidence, verbose=False)[0]
+            return count_instances(result)
         except Exception as error:
             raise DetectorUnavailableError('Ошибка выполнения CPU-детектора.') from error
 
@@ -943,6 +945,22 @@ class Worker:
             providers=['CPUExecutionProvider'])
         self._identity_analyser.prepare(ctx_id=-1, det_size=(320, 320))
         return self._identity_analyser
+
+    def _human_portrait_references(self, snapshot):
+        """Human face comparison accepts human references, including legacy snapshots."""
+        from .subject_policy import enrich, policy
+        references = []
+        for reference in snapshot.get('references', []):
+            if reference.get('role') != 'portrait':
+                continue
+            kind = reference.get('entity_type')
+            if not kind and reference.get('character_id'):
+                character = self.service.character(reference['character_id'])
+                project = self.service.project(character['project_id'])
+                kind = enrich([character], project.get('cast_bible'))[0]['entity_type']
+            if policy({'entity_type': kind})['entity_type'] == 'human':
+                references.append(reference['asset_id'])
+        return references
 
     def _identity_similarity(self, image, reference_asset_id):
         """Return ArcFace cosine similarity, or None when a face is not usable."""
@@ -1166,7 +1184,27 @@ class Worker:
                 if (transitions / float(max(1, bh)) >= 10 and
                         transitions / float(max(1, bw * bh)) >= 0.045 and
                         pale_neutral >= 0.03):
-                    return True
+                    # Edges on snow, stone and illustrated clothing also form
+                    # long horizontal runs. Require pale foreground glyphs,
+                    # rather than counting arbitrary light background pixels.
+                    pale = ((np.min(color, axis=2) > 200) &
+                            ((np.max(color, axis=2) - np.min(color, axis=2)) < 35))
+                    _, _, parts, _ = cv2.connectedComponentsWithStats(
+                        pale.astype(np.uint8))
+                    glyphs = [part for part in parts[1:]
+                              if max(2, int(bh * 0.20)) <= part[cv2.CC_STAT_HEIGHT] <= bh
+                              and 1 <= part[cv2.CC_STAT_WIDTH] <= bh * 1.6
+                              and 3 <= part[cv2.CC_STAT_AREA] <= bw * bh * 0.12]
+                    # A subtitle has several letters on a common baseline.
+                    # A broad bright patch with scattered dark strokes does not.
+                    tolerance = max(2, int(bh * 0.15))
+                    for glyph in glyphs:
+                        baseline = glyph[cv2.CC_STAT_TOP] + glyph[cv2.CC_STAT_HEIGHT]
+                        aligned = [part for part in glyphs
+                                   if abs(part[cv2.CC_STAT_TOP] + part[cv2.CC_STAT_HEIGHT]
+                                          - baseline) <= tolerance]
+                        if len(aligned) >= 6:
+                            return True
 
             # Generators also produce cyan, yellow and softly glowing captions.
             # Their colour separates them from ordinary dark ink, so join
@@ -1318,6 +1356,51 @@ class Worker:
                 raise
             snapshot['quality_review'] = {'status': 'unverified', 'reason': 'Проверка композиции не подтверждена.'}
 
+    def _review_scene_identity(self, snapshot, image):
+        """Scene identity checks annotate images; they never veto or retry them."""
+        review = {'version': 'scene-identity-advisory/1', 'enforcement': 'advisory',
+                  'method': 'reference_face_similarity', 'status': 'unverified'}
+        try:
+            references = self._human_portrait_references(snapshot)
+            review['human_references'] = len(references)
+            if not references:
+                review.update(status='not_applicable', reason='Нет эталонов человеческих лиц для сравнения.')
+            else:
+                similarity = (self._identity_similarity(image, references[0]) if len(references) == 1
+                              else self._identity_assignment_similarity(image, references))
+                small = self._identity_face_too_small(image, len(references))
+                threshold = 0.15 if small else (0.45 if len(references) == 1 else 0.38)
+                review.update(threshold=threshold, small_face=bool(small))
+                import math
+                from numbers import Real
+                if not isinstance(similarity, Real) or isinstance(similarity, bool) or not math.isfinite(similarity):
+                    review.update(similarity=None, reason='Не удалось уверенно сравнить лицо с эталоном. Кадр сохранён для просмотра.')
+                elif similarity < threshold:
+                    review.update(status='needs_review', similarity=float(similarity),
+                        reason='Проверьте сходство героя с эталоном: автоматическая оценка низкая. Кадр сохранён.')
+                else:
+                    review.update(status='not_flagged', similarity=float(similarity),
+                        reason='Проверка не отметила низкого сходства; окончательная оценка остаётся за пользователем.')
+        except Exception as error:
+            log.warning('Advisory scene identity check unavailable (%s)', type(error).__name__)
+            review.update(error_type=type(error).__name__,
+                reason='Автоматическая проверка сходства недоступна. Кадр сохранён; проверьте героя визуально.')
+        snapshot['identity_review'] = review
+        return review
+
+    def _review_scene_geometry(self, snapshot, image):
+        from .composition_review import record_population_review
+        counts, errors = {}, []
+        for key, detector in (('faces', self._detected_face_count),
+                              ('people', self._detected_person_count),
+                              ('hands', self._detected_hand_count)):
+            try:
+                counts[key] = detector(image)
+            except (DetectorUnavailableError, ContentRejectedError) as error:
+                counts[key] = None
+                errors.append(type(error).__name__)
+        return record_population_review(snapshot, counts, method='yolo_geometry', errors=errors)
+
     def _validate_external_scene_image_strict(self, snapshot, data):
         """Apply the FrameForge composition contract to an image returned by Flow."""
         from PIL import Image
@@ -1341,35 +1424,8 @@ class Worker:
             from .portrait_contract import marker_scene_review
             if marker_scene_review(snapshot,image):
                 return
-            expected_people = int(snapshot.get('expected_people', 0))
-            if not expected_people:
-                return
-            try:
-                faces = self._detected_face_count(image)
-                people = self._detected_person_count(image)
-                hands = self._detected_hand_count(image)
-            except ContentRejectedError as error:
-                # Pose/anatomy detection is optional. Do not return here: the
-                # independent face-identity gate below may still be available
-                # and must never be disabled by a missing YOLO package.
-                log.warning('Flow geometry validator unavailable: %s', error)
-                faces = people = hands = None
-            if faces is not None and (faces > expected_people or people > expected_people):
-                raise ContentRejectedError('Количество людей не совпадает с составом сцены. Кадр не принят.')
-            if hands is not None and hands > expected_people * 2:
-                raise ContentRejectedError('В кадре найдено больше рук, чем допускает состав персонажей. Кадр не принят.')
-            portrait_references = [reference['asset_id'] for reference in snapshot.get('references', [])
-                                   if reference.get('role') == 'portrait']
-            if portrait_references:
-                if len(portrait_references) == 1:
-                    similarity = self._identity_similarity(image, portrait_references[0])
-                else:
-                    similarity = self._identity_assignment_similarity(image, portrait_references)
-                is_small = self._identity_face_too_small(image, len(portrait_references))
-                threshold = 0.15 if is_small else (0.45 if len(portrait_references) == 1 else 0.38)
-                if (similarity is not None and similarity < threshold) or (similarity is None and not is_small):
-                    raise ContentRejectedError(
-                        'Лицо в кадре недостаточно похоже на зафиксированного персонажа. Кадр не принят.')
+            self._review_scene_geometry(snapshot, image)
+            self._review_scene_identity(snapshot, image)
 
     def _validate_generated_composition(self, generation, snapshot, image):
         if not visual_reviews_enabled() and self._advisory_quality(snapshot):
@@ -1382,6 +1438,7 @@ class Worker:
         if self._advisory_quality(snapshot):
             return  # Source-aware pixel review replaces rigid people/hand counts.
         expected_people = int(snapshot.get('expected_people', 0))
+        exact_people_count = not snapshot.get('people_count_unresolved')
         from .portrait_contract import validate_portrait, marker_scene_review
         from .visual_style import is_marker_style
         if is_marker_style(snapshot.get('style')):
@@ -1394,11 +1451,15 @@ class Worker:
             faces = self._detected_face_count(image)
             if faces != 1:
                 raise ContentRejectedError('Референс персонажа должен содержать ровно одно лицо без посторонних людей. Кадр не принят.')
+        if generation['purpose'] == 'scene':
+            self._review_scene_geometry(snapshot, image)
+        # Strict geometry gates below belong to isolated reference assets.
+        # Story-frame detector proposals are evidence for review, not a census.
         # Validate the composition by both faces and whole-person silhouettes.
         # A profile, a person seen from behind, or a tight close-up may hide
         # one of those signals, therefore absence is not a failure. Any
         # detector finding *more* humans than declared is a concrete error.
-        if generation['purpose'] != 'casting' and (snapshot.get('uninhabited') or expected_people):
+        if generation['purpose'] not in ('casting', 'scene') and (snapshot.get('uninhabited') or exact_people_count and expected_people):
             # Face detection is useful for story frames but produces false
             # positives on lamps, curtains and decor in empty interiors.
             # A location reference still rejects a detected full person;
@@ -1411,20 +1472,25 @@ class Worker:
             faces = 0 if generation['purpose'] == 'location' else self._detected_face_count(image)
             if snapshot.get('uninhabited') and (faces or people):
                 raise ContentRejectedError('В пустой сцене найден человек. Кадр не принят.')
-            if expected_people and (faces > expected_people or people > expected_people):
-                raise ContentRejectedError('Количество людей не совпадает с составом сцены. Кадр не принят.')
+            if exact_people_count and expected_people and (faces > expected_people or people > expected_people):
+                error = ContentRejectedError('Количество людей не совпадает с составом сцены. Кадр не принят.')
+                error.details = {'code': 'COMPOSITION_PEOPLE_COUNT', 'expected': expected_people,
+                                 'detected_faces': faces, 'detected_people': people}
+                raise error
             # When both detectors recognise the foreground, require that at
             # least one proves the declared composition. This accepts a back
             # view, close-up or cropped two-person shot without accepting a
             # blank landscape for a human scene.
-            if expected_people and max(faces, people) < expected_people:
+            if exact_people_count and expected_people and max(faces, people) < expected_people:
                 raise ContentRejectedError('Не удалось подтвердить нужное число людей в сцене. Кадр не принят.')
         if generation['purpose'] == 'location' and self._detected_hand_count(image):
             raise ContentRejectedError('В референсе локации найдены лишние руки или части тела. Кадр не принят.')
-        if expected_people and self._detected_hand_count(image) > expected_people * 2:
+        if generation['purpose'] != 'scene' and exact_people_count and expected_people and self._detected_hand_count(image) > expected_people * 2:
             raise ContentRejectedError('В кадре найдено больше рук, чем допускает состав персонажей. Кадр не принят.')
-        portrait_references = [reference['asset_id'] for reference in snapshot.get('references', [])
-                               if reference.get('role') == 'portrait']
+        if generation['purpose'] == 'scene':
+            self._review_scene_identity(snapshot, image)
+            return
+        portrait_references = self._human_portrait_references(snapshot)
         if portrait_references:
             if len(portrait_references) == 1:
                 similarity = self._identity_similarity(image, portrait_references[0])
@@ -1433,8 +1499,11 @@ class Worker:
             is_small = self._identity_face_too_small(image, len(portrait_references))
             threshold = 0.15 if is_small else (0.45 if len(portrait_references) == 1 else 0.38)
             if (similarity is not None and similarity < threshold) or (similarity is None and not is_small):
-                raise ContentRejectedError(
+                error = ContentRejectedError(
                     'Лицо в кадре недостаточно похоже на зафиксированного персонажа. Кадр не принят.')
+                error.details = {'code': 'COMPOSITION_IDENTITY', 'human_references': len(portrait_references),
+                                 'similarity': similarity, 'threshold': threshold, 'small_face': is_small}
+                raise error
 
     def save_image(self, generation, data):
         from PIL import Image

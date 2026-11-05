@@ -116,6 +116,58 @@ CREATE TABLE IF NOT EXISTS stock_results(
  preview_url TEXT NOT NULL DEFAULT '', large_url TEXT NOT NULL DEFAULT '', download_url TEXT NOT NULL DEFAULT '',
  metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, UNIQUE(provider, external_id));
 CREATE INDEX IF NOT EXISTS idx_stock_results_lookup ON stock_results(provider, external_id);
+CREATE TABLE IF NOT EXISTS material_search_plans(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ snapshot_hash TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1,
+ options_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_material_plans_project ON material_search_plans(project_id);
+CREATE TABLE IF NOT EXISTS material_search_requirements(
+ id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES material_search_plans(id) ON DELETE CASCADE,
+ segment_key TEXT NOT NULL, origin_clip_ids_json TEXT NOT NULL DEFAULT '[]',
+ narration_origin_clip_id TEXT NOT NULL DEFAULT '', quote TEXT NOT NULL DEFAULT '',
+ start_ms INTEGER, end_ms INTEGER, duration_ms INTEGER NOT NULL DEFAULT 0,
+ subject_entities_json TEXT NOT NULL DEFAULT '[]', action TEXT NOT NULL DEFAULT '',
+ location TEXT NOT NULL DEFAULT '', period TEXT NOT NULL DEFAULT '',
+ mandatory_details_json TEXT NOT NULL DEFAULT '[]', forbidden_substitutions_json TEXT NOT NULL DEFAULT '[]',
+ universe_id TEXT NOT NULL DEFAULT '', requested_role TEXT NOT NULL DEFAULT 'exact',
+ generated_queries_json TEXT NOT NULL DEFAULT '[]', user_queries_json TEXT NOT NULL DEFAULT '[]',
+ enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, UNIQUE(plan_id, segment_key));
+CREATE INDEX IF NOT EXISTS idx_material_reqs_plan ON material_search_requirements(plan_id);
+CREATE TABLE IF NOT EXISTS material_search_jobs(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ plan_id TEXT NOT NULL REFERENCES material_search_plans(id) ON DELETE CASCADE,
+ state TEXT NOT NULL DEFAULT 'queued', stage TEXT NOT NULL DEFAULT 'searching',
+ progress REAL NOT NULL DEFAULT 0.0, total_queries INTEGER NOT NULL DEFAULT 0,
+ processed_queries INTEGER NOT NULL DEFAULT 0, total_candidates INTEGER NOT NULL DEFAULT 0,
+ verified_candidates INTEGER NOT NULL DEFAULT 0, current_step TEXT NOT NULL DEFAULT '',
+ checkpoint_json TEXT NOT NULL DEFAULT '{}', error_message TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_material_jobs_project ON material_search_jobs(project_id, state);
+CREATE TABLE IF NOT EXISTS material_search_candidates(
+ id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES material_search_jobs(id) ON DELETE CASCADE,
+ requirement_id TEXT NOT NULL REFERENCES material_search_requirements(id) ON DELETE CASCADE,
+ result_id TEXT NOT NULL, provider TEXT NOT NULL, external_id TEXT NOT NULL,
+ media_type TEXT NOT NULL DEFAULT 'photo', candidate_json TEXT NOT NULL DEFAULT '{}',
+ semantic_status TEXT NOT NULL DEFAULT 'needs_review', identity_status TEXT NOT NULL DEFAULT 'not_required',
+ rights_status TEXT NOT NULL DEFAULT 'unknown', reasons_json TEXT NOT NULL DEFAULT '[]',
+ rank_score REAL NOT NULL DEFAULT 0.0, is_selected INTEGER NOT NULL DEFAULT 0,
+ is_imported INTEGER NOT NULL DEFAULT 0, imported_item_id TEXT, created_at TEXT NOT NULL,
+ UNIQUE(job_id, requirement_id, provider, external_id));
+CREATE INDEX IF NOT EXISTS idx_material_candidates_job ON material_search_candidates(job_id, requirement_id);
+CREATE TABLE IF NOT EXISTS material_entity_catalog(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ entity_key TEXT NOT NULL, canonical_name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]',
+ universe_id TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'character',
+ references_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(project_id, entity_key));
+CREATE INDEX IF NOT EXISTS idx_material_catalog_project ON material_entity_catalog(project_id);
+CREATE TABLE IF NOT EXISTS material_qwen_verification_cache(
+ cache_key TEXT PRIMARY KEY,
+ status TEXT NOT NULL,
+ status_label TEXT NOT NULL DEFAULT '',
+ reason TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_material_qwen_cache_key ON material_qwen_verification_cache(cache_key);
 CREATE TABLE IF NOT EXISTS stock_rate_state(
  provider TEXT PRIMARY KEY, rate_limit INTEGER NOT NULL DEFAULT 100,
  rate_remaining INTEGER NOT NULL DEFAULT 100, rate_reset_at REAL NOT NULL DEFAULT 0,
@@ -127,6 +179,32 @@ CREATE TABLE IF NOT EXISTS media_library_sources(
  author_name TEXT NOT NULL DEFAULT '', author_url TEXT NOT NULL DEFAULT '',
  license_type TEXT NOT NULL DEFAULT 'free_pixabay', created_at TEXT NOT NULL, UNIQUE(project_id, item_id));
 CREATE INDEX IF NOT EXISTS idx_media_sources_item ON media_library_sources(project_id, item_id);
+CREATE TABLE IF NOT EXISTS material_browse_sessions(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ provider TEXT NOT NULL, query TEXT NOT NULL, filters_json TEXT NOT NULL DEFAULT '{}',
+ mode TEXT NOT NULL DEFAULT 'manual', state TEXT NOT NULL DEFAULT 'completed',
+ error_message TEXT, total_results INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_material_browse_sessions_project ON material_browse_sessions(project_id);
+CREATE TABLE IF NOT EXISTS material_browse_items(
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES material_browse_sessions(id) ON DELETE CASCADE,
+ project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ provider TEXT NOT NULL, external_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+ description TEXT NOT NULL DEFAULT '', source_page_url TEXT NOT NULL DEFAULT '',
+ preview_url TEXT NOT NULL DEFAULT '', thumbnail_url TEXT NOT NULL DEFAULT '',
+ large_url TEXT NOT NULL DEFAULT '', download_url TEXT NOT NULL DEFAULT '',
+ width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0,
+ format TEXT NOT NULL DEFAULT 'jpeg', license_name TEXT NOT NULL DEFAULT '',
+ rights_status TEXT NOT NULL DEFAULT 'unknown', author TEXT NOT NULL DEFAULT '',
+ metadata_json TEXT NOT NULL DEFAULT '{}', is_imported INTEGER NOT NULL DEFAULT 0,
+ imported_item_id TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_material_browse_items_session ON material_browse_items(session_id);
+CREATE TABLE IF NOT EXISTS material_search_usage(
+ id TEXT PRIMARY KEY, provider TEXT NOT NULL, period TEXT NOT NULL,
+ requests_count INTEGER NOT NULL DEFAULT 0, configured_limit INTEGER NOT NULL DEFAULT 50,
+ allow_paid INTEGER NOT NULL DEFAULT 0, last_request_at TEXT NOT NULL,
+ UNIQUE(provider, period));
+CREATE INDEX IF NOT EXISTS idx_material_usage_provider ON material_search_usage(provider, period);
 CREATE TABLE IF NOT EXISTS characters(
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
  name TEXT NOT NULL, description TEXT NOT NULL, wardrobe TEXT NOT NULL DEFAULT '{}',

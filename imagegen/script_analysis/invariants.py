@@ -1,5 +1,6 @@
 """Deterministic, visible repairs; no invented entities or discarded scenes."""
 import unicodedata
+from ..entity_identity import specific_label
 from .schemas import Registry, Scene
 
 
@@ -21,10 +22,22 @@ def normalize_registry(registry: Registry) -> tuple[Registry, dict[str, str], li
 
     seen: dict[str, int] = {}
     for i, char in enumerate(chars):
-        keys = {"id:" + char.id} | {"name:" + identity(a) for a in [char.name, *char.aliases] if identity(a)}
+        # Shared profession/title/first name never proves two records are one person.
+        keys = {"id:" + char.id}
+        if specific_label(char.name):keys.add("primary:" + identity(char.name))
+        for alias in char.aliases:
+            if len(alias.split())>1 and specific_label(alias):
+                keys.add('full:'+identity(alias))
+        if len(char.name.split())>1 and specific_label(char.name):keys.add('full:'+identity(char.name))
         for key in sorted(keys):
             if key in seen:
                 a, b = root(i), root(seen[key])
+                other=chars[seen[key]]
+                # Distinct full names remain distinct even if a provider polluted aliases.
+                if (key.startswith('full:') and identity(char.name)!=identity(other.name)
+                        and len(char.name.split())>1 and len(other.name.split())>1):
+                    warnings.append(f'characters: неоднозначный alias {key[5:]!r}; {char.id} и {other.id} не объединены')
+                    continue
                 parents[max(a, b)] = min(a, b)
             else:
                 seen[key] = i
@@ -40,14 +53,14 @@ def normalize_registry(registry: Registry) -> tuple[Registry, dict[str, str], li
             char = chars[i]
             remap[char.id] = canonical.id
             for alias in [char.name, *char.aliases]:
-                if identity(alias):
+                if identity(alias) and (alias==char.name or specific_label(alias)):
                     aliases.setdefault(identity(alias), alias)
             if i != indexes[0]:
                 warnings.append(f"characters: объединены {char.id} → {canonical.id}; совпали имя, alias или id")
         if len(indexes) > 1:
             canonical.aliases = list(aliases.values())
         else:
-            canonical.aliases = list(dict((identity(a), a) for a in canonical.aliases if identity(a)).values())
+            canonical.aliases = list(dict((identity(a), a) for a in canonical.aliases if identity(a) and specific_label(a)).values())
             if canonical.aliases != chars[indexes[0]].aliases:
                 warnings.append(f"characters[{canonical.id}]: удалены пустые или повторные aliases")
         merged.append(canonical)

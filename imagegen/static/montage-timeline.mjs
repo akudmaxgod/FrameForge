@@ -2,6 +2,7 @@ import {effectiveClip} from './montage-layers.mjs';
 // Same millisecond contract as editing.normalize; shared fixtures test parity.
 export function normalize(document){
   const clips=document.clips.filter(c=>!c.excluded).map(effectiveClip).map(c=>{const duration_ms=(c.trim_out_ms-c.trim_in_ms)/(c.playback_rate??1)+(c.hold_last_ms||0);return {...c,duration_ms,base_duration_ms:duration_ms,in_ms:0,out_ms:0,out_kind:'cut'};});
+  if(document.footage_muted)for(const clip of clips)if(clip.source_kind==='footage')clip.muted=true;
   const joins=new Map((document.transitions||[]).map(t=>[`${t.left}|${t.right}`,t]));
   for(let i=0;i<clips.length-1;i++){
     const left=clips[i],right=clips[i+1],t=joins.get(`${left.edit_clip_id}|${right.edit_clip_id}`)||{};
