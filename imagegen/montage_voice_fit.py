@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 from .db import uid
+from .release_paths import component_root
 from .domain import DomainError
 from .editing import normalize
 
@@ -236,11 +237,55 @@ def propose_duration(snap):
         'timing_accuracy_measured':False,'short_video_policy':'freeze_trimmed_end'}
 
 
+def propose_auto(snap):
+    """A deterministic clock preserving every included event and source file."""
+    work=copy.deepcopy(snap)
+    timing_fields=('trim_in_ms','trim_out_ms','playback_rate','hold_last_ms','media_type','source_video_asset_id','source_duration_ms','camera_motion')
+    prior=snap['document'].get('voice_fit',{}).get('auto_origins',{})
+    origins={}
+    for c in work['document']['clips']:
+        cid=c['edit_clip_id'];saved=prior.get(cid)
+        clock={k:c.get(k) for k in timing_fields}
+        if saved and clock==saved['applied']:
+            for k,v in saved['original'].items():
+                if v is None:c.pop(k,None)
+                else:c[k]=copy.deepcopy(v)
+        origins[cid]={'original':{k:c.get(k) for k in timing_fields}}
+    for c in work['document']['clips']:
+        # Automatic retiming is explicit authorization to change clip timing.
+        c.pop('timing_locked',None);c.pop('manual_timing',None)
+    result=propose_duration(work)
+    doc=result['document'];target=snap['audio_binding']['offset_ms']+snap['audio_binding']['trim_out_ms']-snap['audio_binding']['trim_in_ms']
+    scenes={s['id']:s for s in snap['scenes']}
+    active=[c for c in doc['clips'] if not c.get('excluded')]
+    for c,change in zip(active,result['changes']):
+        length=change['new_end_ms']-change['new_start_ms']
+        scene=scenes.get(c.get('scene_id'),{});animation=scene.get('data',{}).get('animation',{})
+        if animation.get('source')=='ken_burns' and scene.get('image_asset_id')==c.get('source_image_asset_id') and scene.get('image_width') and scene.get('image_height'):
+            from .montage_media import camera_plan
+            c.update(media_type='image',source_video_asset_id=None,source_duration_ms=86400000,
+                camera_motion=camera_plan(scene['image_width'],scene['image_height'],animation.get('ken_burns_preset') or 'gentle_push_in'))
+        for layer in [c]+([c['footage_overlay']] if c.get('footage_overlay') else []):
+            if layer.get('media_type')=='image':
+                layer.update(trim_in_ms=0,trim_out_ms=length,playback_rate=1,hold_last_ms=0)
+            else:
+                available=layer['trim_out_ms']-layer['trim_in_ms']
+                rate=max(.8,min(1,available/length))
+                moving=min(length,available/rate)
+                layer.update(trim_out_ms=layer['trim_in_ms']+moving*rate,playback_rate=rate,hold_last_ms=max(0,length-moving),muted=True)
+        original=next(x for x in snap['document']['clips'] if x['edit_clip_id']==c['edit_clip_id'])
+        for flag in ('timing_locked','manual_timing'):
+            if flag in original:c[flag]=original[flag]
+    for c in doc['clips']:origins[c['edit_clip_id']]['applied']={k:c.get(k) for k in timing_fields}
+    doc['voice_fit'].update(method='auto',target_ms=target,source_hash=source_signature(doc),auto_origins=origins)
+    result.update(method='auto',timeline=normalize(doc))
+    return result
+
+
 class MontageVoiceFit:
     def __init__(self,service):
         self.service=service;self.root=service.root/'montage-voice-fit'
         self.lock=threading.RLock();self.slot=threading.Semaphore(1);self.running={}
-        from .release_paths import component_root
         self.base=component_root()
 
     def _path(self,pid,jid):
@@ -287,18 +332,26 @@ class MontageVoiceFit:
         metadata=self.service.project(pid).get('analysis_metadata') or {}
         if isinstance(metadata,str):metadata=json.loads(metadata)
         mode=data.get('timing_mode') or ('duration_freeze' if metadata.get('prompt_import') else 'phrases')
-        if mode not in ('phrases','duration_freeze','semantic'):raise DomainError('Неизвестный способ подгонки.')
+        if mode not in ('auto','phrases','duration_freeze','semantic','condense'):raise DomainError('Неизвестный способ подгонки.')
+        if mode=='condense':
+            from .montage_condense import prepare
+            prepare(snap,data.get('keep_clip_ids'))
         if mode=='semantic':
             from .montage_semantic import clip_texts
             clip_texts(snap)
+        if mode=='auto':
+            previous=edit['document'].get('voice_fit',{}).get('proposal_id')
+            if previous:
+                old=self._read(pid,previous)
+                if old.get('timing_mode')=='auto' and old.get('applied_revision')==edit['revision'] and old.get('applied_hash')==signature(edit['document']):return self.get(pid,previous)
         with self.lock:
             for jid,(other_pid,event) in self.running.items():
                 if other_pid==pid:
                     old=self._read(pid,jid)
-                    if signature(old['snapshot'])==signature(snap) and old['policy']==policy and old.get('timing_mode','phrases')==mode:return self.get(pid,jid)
+                    if signature(old['snapshot'])==signature(snap) and old['policy']==policy and old.get('timing_mode','phrases')==mode and old.get('keep_clip_ids')==data.get('keep_clip_ids'):return self.get(pid,jid)
                     raise DomainError('Для этого проекта уже рассчитывается подгонка. Дождитесь результата или отмените её.',409)
             jid=uid();event=threading.Event();self.running[jid]=(pid,event)
-            self._write(pid,jid,{'id':jid,'snapshot':snap,'policy':policy,'timing_mode':mode,'status':'queued',
+            self._write(pid,jid,{'id':jid,'snapshot':snap,'policy':policy,'timing_mode':mode,'keep_clip_ids':data.get('keep_clip_ids'),'status':'queued',
                                 'stage':'Распределяю стоп-кадры по озвучке' if mode=='duration_freeze' else 'Ожидаю локальное распознавание речи','progress':0})
             threading.Thread(target=self._run,args=(pid,jid,event),daemon=True,name='montage-voice-fit').start()
         return self.get(pid,jid)
@@ -351,8 +404,14 @@ class MontageVoiceFit:
             with self.slot:
                 if event.is_set():raise InterruptedError()
                 value=self._read(pid,jid);snap=value['snapshot']
-                if value.get('timing_mode')=='duration_freeze':
+                if value.get('timing_mode')=='auto':
+                    proposal=self.auto_proposal(snap)
+                elif value.get('timing_mode')=='duration_freeze':
                     proposal=propose_duration(snap)
+                elif value.get('timing_mode')=='condense':
+                    from .montage_condense import prepare,finish
+                    reduced,rows=prepare(snap,value.get('keep_clip_ids'))
+                    proposal=finish(snap,self.semantic_proposal(pid,jid,reduced,event),rows)
                 elif value.get('timing_mode')=='semantic':
                     proposal=self.semantic_proposal(pid,jid,snap,event)
                 else:
@@ -365,10 +424,32 @@ class MontageVoiceFit:
                 with self.lock:
                     if event.is_set():raise InterruptedError()
                     self._update(pid,jid,status='ready',progress=100,stage='Предпросмотр готов. Монтаж ещё не изменён.',proposal=proposal)
+                    if value.get('timing_mode')=='auto' and proposal['can_apply']:
+                        self.apply(pid,jid,{'expected_revision':snap['edit_revision']})
         except InterruptedError:self._update(pid,jid,status='cancelled',stage='Расчёт отменён; монтаж сохранён.')
         except Exception as error:self._update(pid,jid,status='failed',stage='Расчёт остановлен',error=str(error))
         finally:
             with self.lock:self.running.pop(jid,None)
+
+    def auto_proposal(self,snap):
+        # Reuse acoustic evidence only; the main action never waits for a model.
+        voice=snap['audio_binding']
+        paths=[self.service.root/'voice/asr'/(voice['sha256']+'.json'),
+               self.root/'asr'/voice['sha256']/hashlib.sha256(snap['story'].encode()).hexdigest()/'recognized.json']
+        for path in paths:
+            if not path.is_file():continue
+            try:
+                from .voice_asr import repair_cache_matches
+                from .voice_alignment import build_report
+                asr=json.loads(path.read_text(encoding='utf-8'))
+                if not repair_cache_matches(asr,snap['story']):continue
+                alignment=build_report({'project':{'id':snap['project_id'],'story':snap['story']},'scenes':[]},asr)
+                result=propose(snap,alignment,'hold')
+                if result['can_apply']:
+                    result['method']='auto';result['document']['voice_fit']['method']='auto'
+                    return result
+            except (ValueError,KeyError,DomainError):continue
+        return propose_auto(snap)
 
     def semantic_proposal(self,pid,jid,snap,event):
         from .montage_semantic import clip_texts,speech_units,match,propose
@@ -424,7 +505,7 @@ class MontageVoiceFit:
             if cached.get('input_sha256')==wanted:return cached['vectors']
         self._update(pid,jid,progress=40,stage='Сравниваю смысл промптов и речи локальной моделью…')
         with (directory/'embedding.log').open('w',encoding='utf-8') as log:
-            process=subprocess.Popen([str(python),'-m','imagegen.semantic_runtime',
+            process=subprocess.Popen([str(python),str(Path(__file__).with_name('semantic_runtime.py')),
                 '--input',str(source),'--model',str(model),'--output',str(output),'--progress',str(progress)],
                 cwd=self.base,stdout=log,stderr=subprocess.STDOUT,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             try:
@@ -446,14 +527,19 @@ class MontageVoiceFit:
         from .montage_semantic import propose
         with self.lock:
             value=self._read(pid,jid)
-            if value['status']!='ready' or value.get('timing_mode')!='semantic':raise DomainError('Нет готовых смысловых привязок для проверки.',409)
+            if value['status']!='ready' or value.get('timing_mode') not in ('semantic','condense'):raise DomainError('Нет готовых смысловых привязок для проверки.',409)
             mapping=value['proposal']['mapping']
             if data.get('expected_review_revision')!=mapping.get('review_revision',0):raise DomainError('Привязки уже изменены. Обновите предпросмотр.',409)
             if signature(snapshot(self.service,pid,self.service.editing.get(pid)))!=signature(value['snapshot']):
                 raise DomainError('Монтаж, промпты или озвучка изменились. Рассчитайте новый вариант.',409)
             decisions=data.get('decisions')
             if not isinstance(decisions,list) or len(decisions)>2000:raise DomainError('Некорректный список подтверждений.')
-            proposal=propose(value['snapshot'],mapping,decisions)
+            if value.get('timing_mode')=='condense':
+                from .montage_condense import prepare,finish
+                reduced,rows=prepare(value['snapshot'],value.get('keep_clip_ids'))
+                proposal=finish(value['snapshot'],propose(reduced,mapping,decisions),rows)
+            else:
+                proposal=propose(value['snapshot'],mapping,decisions)
             proposal['mapping']['review_revision']=mapping.get('review_revision',0)+1
             proposal['document']['voice_fit']['semantic_mapping']['review_revision']=proposal['mapping']['review_revision']
             value.update(proposal=proposal,stage='Проверка привязок сохранена. Монтаж ещё не изменён.')

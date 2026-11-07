@@ -4594,7 +4594,15 @@ class Service:
                 raise DomainError('Omni 1.1 Flash поддерживает 4, 6, 8 или 10 секунд.')
         scene = self.scene(scene_id)
         project_id = scene['project_id']
-        project = self.detail(project_id)
+        # Local engine selection needs settings, narration timing and scene
+        # count, not a complete narrative/source audit of every image.
+        if engine == 'ken_burns':
+            project = self.project(project_id)
+            project['animation_settings'] = json.loads(project.get('animation_settings') or '{}')
+            project['scenes'] = [self.scene(row['id']) for row in self.db.all(
+                'SELECT id FROM scenes WHERE project_id=? ORDER BY position',(project_id,))]
+        else:
+            project = self.detail(project_id)
         settings = validate_animation_settings(project.get('animation_settings'))
 
         if settings['plan_mode'] == 'economy' and engine == 'veo_lite':
@@ -4609,11 +4617,18 @@ class Service:
                 )
 
         current_anim = dict(scene['data'].get('animation') or {})
+        if current_anim.get('status') in ('queued_omni', 'generating_omni', 'queued_veo', 'generating_veo'):
+            if (engine == current_anim.get('selected_engine') and all(value is None for value in
+                    (camera_motion, duration_seconds, ken_burns_preset, omni_resolution, motion_scope))):
+                return {'scene': scene, 'reused': True}
+            if current_anim.get('status') in ('generating_omni', 'generating_veo'):
+                raise DomainError('Для кадра уже выполняется задание Flow. Его параметры сохранены; дождитесь результата перед изменением.', 409)
         score, reasons, default_camera = score_scene_for_animation(
             scene['data'], scene['position'], len(project['scenes'])
         )
 
         current_anim['mode'] = 'manual'
+        current_anim['prompt_contract'] = 'image-motion/3'
         current_anim['error'] = None
         current_anim.pop('idempotency_key', None)
         if motion_scope is not None:
@@ -4690,7 +4705,7 @@ class Service:
                 'scene_id': scene_id, 'engine': engine, 'credit_cost': current_anim.get('credit_cost', 0)
             })
 
-        reloaded = self.detail(project_id)
+        reloaded = {'scenes':[{'data':json.loads(row['data'])} for row in self.db.all('SELECT r.data FROM scenes s JOIN scene_revisions r ON r.scene_id=s.id AND r.revision=s.current_revision WHERE s.project_id=?',(project_id,))]} if engine == 'ken_burns' else self.detail(project_id)
         veo_total = sum(1 for s in reloaded['scenes'] if s['data'].get('animation', {}).get('selected_engine') == 'veo_lite')
         kb_total = sum(1 for s in reloaded['scenes'] if s['data'].get('animation', {}).get('selected_engine') == 'ken_burns')
         omni_total = sum(1 for s in reloaded['scenes'] if s['data'].get('animation', {}).get('selected_engine') == 'omni_flash')
@@ -4710,6 +4725,9 @@ class Service:
         settings = validate_animation_settings(project.get('animation_settings'))
 
         current_anim = dict(scene['data'].get('animation') or {})
+        if current_anim.get('status') not in ('queued_omni', 'generating_omni', 'queued_veo', 'generating_veo'):
+            current_anim['prompt_contract'] = 'image-motion/3'
+            scene['data']['animation'] = current_anim
         score, reasons, default_camera = score_scene_for_animation(
             scene['data'], scene['position'], len(project['scenes'])
         )
@@ -4808,6 +4826,9 @@ class Service:
         data = dict(scene['data'] or {})
         anim = dict(data.get('animation') or {})
         omni = dict(anim.get('omni') or {})
+        if anim.get('status') not in ('queued_omni', 'generating_omni', 'queued_veo', 'generating_veo'):
+            anim['prompt_contract'] = 'image-motion/3'
+            scene['data']['animation'] = anim
         omni.update({'resolution': resolution, 'duration_seconds': int(duration_seconds)})
 
         prompt = self._omni_animation_prompt(scene, int(duration_seconds))
@@ -4943,6 +4964,14 @@ class Service:
             if anim.get('status') == 'completed' and scene.get('video_asset_id') and not regenerate_local:
                 results.append({'scene_id': s_id, 'engine': engine, 'status': 'completed', 'video_asset_id': scene.get('video_asset_id')})
                 continue
+
+            if engine in ('omni_flash', 'veo_lite') and anim.get('status') in ('queued_omni', 'generating_omni', 'queued_veo', 'generating_veo'):
+                results.append({'scene_id': s_id, 'engine': engine, 'status': anim['status'], 'reused': True})
+                continue
+
+            if engine in ('omni_flash', 'veo_lite'):
+                anim['prompt_contract'] = 'image-motion/3'
+                scene['data']['animation'] = anim
 
             if engine == 'veo_lite':
                 cur_rev = scene.get('current_revision', 1)
@@ -5179,6 +5208,20 @@ class Service:
                 if not stored_key:
                     stored_key = f"{'omni' if engine == 'omni_flash' else 'veo'}_{scene['id'][:8]}_{source_sha256[:12]}"
 
+                stored_request = self.db.one('''SELECT prompt,source_image_asset_id,source_image_sha256,
+                    duration_seconds,resolution FROM veo_jobs WHERE project_id=? AND scene_id=? AND idempotency_key=?''',
+                    (project_id, scene['id'], stored_key))
+                if stored_request:
+                    # A request key identifies immutable prompt + source bytes.
+                    # Upgrading the compiler must not rewrite a request whose
+                    # remote outcome may still be unknown in the browser.
+                    if (stored_request['source_image_asset_id'] != source_asset_id
+                            or stored_request['source_image_sha256'] != source_sha256):
+                        continue
+                    story_prompt = stored_request['prompt']
+                    duration = stored_request['duration_seconds']
+                    resolution = stored_request['resolution']
+
                 job = {
                     'kind': 'scene_video',
                     'scene_id': scene['id'],
@@ -5193,6 +5236,8 @@ class Service:
                     'model': 'gemini-omni-1.1-flash' if engine == 'omni_flash' else 'veo-3.1-lite',
                     'camera_motion': camera if engine == 'veo_lite' else None,
                     'prompt': story_prompt or veo_prompt,
+                    'prompt_contract': anim.get('prompt_contract') or 'legacy-motion/1',
+                    'requires_direction_refresh': anim.get('prompt_contract') != 'image-motion/3',
                     'story_prompt': story_prompt or veo_prompt,
                     'micro_actions': passport.get('micro_actions') if passport else None,
                     'negative_constraints': passport.get('negative_constraints') if passport else None,
@@ -5227,9 +5272,22 @@ class Service:
         anim['video_asset_id'] = None
         anim['source'] = 'auto'
         anim['error'] = None
+        anim['prompt_contract'] = 'image-motion/3'
+        source = self.db.one('SELECT asset_id,scene_revision FROM generations WHERE id=?',
+                             (scene.get('active_generation_id'),))
+        asset = self.db.one('SELECT id,sha256,path FROM assets WHERE id=? AND project_id=?',
+                            ((source or {}).get('asset_id'), project_id))
+        if not asset or not asset.get('sha256') or not (self.root / asset['path']).is_file():
+            raise DomainError('Сначала создайте статичное изображение кадра.')
+        camera = (anim.get('veo') or {}).get('camera_motion') or anim.get('camera_motion') or determine_camera_motion(cur_data)
+        duration = int(anim.get('duration_seconds') or 5)
+        anim.update(source_image_asset_id=asset['id'], source_image_sha256=asset['sha256'],
+                    source_generation_id=scene['active_generation_id'], source_revision=source['scene_revision'],
+                    camera_motion=camera, duration_seconds=duration)
         new_salt = secrets.token_hex(4)
         anim['idempotency_key'] = f"veo_{scene_id[:8]}_{new_salt}"
         cur_data['animation'] = anim
+        prompt = compile_veo_prompt(cur_data, camera)
         with self.db.transaction() as connection:
             cur_rev = scene['current_revision']
             connection.execute('INSERT INTO scene_revisions VALUES(?,?,?,?)',
@@ -5237,10 +5295,14 @@ class Service:
             connection.execute('UPDATE scenes SET current_revision=?, video_asset_id=NULL WHERE id=?',
                                (cur_rev + 1, scene_id))
             connection.execute("""
-                INSERT INTO veo_jobs(id, project_id, scene_id, idempotency_key, model, status, created_at)
-                VALUES(?,?,?,?,?,'queued_veo',?)
+                INSERT INTO veo_jobs(id, project_id, scene_id, idempotency_key, model, status, engine,
+                    source_image_asset_id,source_image_sha256,source_generation_id,source_revision,
+                    duration_seconds,resolution,prompt,camera_motion,created_at)
+                VALUES(?,?,?,?,?,'queued_veo',?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(scene_id, idempotency_key) DO UPDATE SET status='queued_veo'
-            """, (uid(), project_id, scene_id, anim['idempotency_key'], 'veo-3.1-lite', now()))
+            """, (uid(), project_id, scene_id, anim['idempotency_key'], 'veo-3.1-lite', 'veo_lite',
+                  asset['id'], asset['sha256'], scene['active_generation_id'], source['scene_revision'],
+                  duration, None, prompt, camera, now()))
             self.db.event(connection, project_id, 'scene_animation_retried', {
                 'scene_id': scene_id, 'engine': 'veo_lite'
             })
@@ -5274,14 +5336,22 @@ class Service:
                 live = connection.execute('SELECT current_revision,active_generation_id,video_asset_id FROM scenes WHERE id=?', (scene_id,)).fetchone()
                 if (live['current_revision'] != cur_rev or live['active_generation_id'] != scene.get('active_generation_id') or live['video_asset_id']):
                     raise DomainError('Кадр изменился во время записи ответа Flow.', 409)
-            connection.execute('INSERT INTO scene_revisions VALUES(?,?,?,?)',
-                               (scene_id, cur_rev + 1, dump(cur_data), now()))
-            connection.execute('UPDATE scenes SET current_revision=? WHERE id=?',
-                               (cur_rev + 1, scene_id))
+            if bound_request and status in ('queued_omni', 'generating_omni', 'queued_veo', 'generating_veo'):
+                # Operational progress must not invalidate the request's source
+                # revision while the provider is producing that exact video.
+                connection.execute('UPDATE scene_revisions SET data=? WHERE scene_id=? AND revision=?',
+                                   (dump(cur_data), scene_id, cur_rev))
+            else:
+                connection.execute('INSERT INTO scene_revisions VALUES(?,?,?,?)',
+                                   (scene_id, cur_rev + 1, dump(cur_data), now()))
+                connection.execute('UPDATE scenes SET current_revision=? WHERE id=?',
+                                   (cur_rev + 1, scene_id))
             connection.execute("""
                 UPDATE veo_jobs SET status=?, error=?
                 WHERE scene_id=? AND status IN ('queued_veo', 'generating_veo', 'queued_omni', 'generating_omni')
-            """, (status, error, scene_id))
+                  AND (? IS NULL OR idempotency_key=?)
+            """, (status, error, scene_id, idempotency_key if bound_request else None,
+                  idempotency_key if bound_request else None))
             self.db.event(connection, scene['project_id'], 'scene_animation_status_updated', {
                 'scene_id': scene_id, 'status': status, 'error': error
             })

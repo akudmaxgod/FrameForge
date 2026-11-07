@@ -19,7 +19,7 @@ from imagegen.montage_voice_fit import propose,snapshot,subtitles,signature
 from imagegen.montage_media import camera_plan,StillReader
 from imagegen.export_worker import render
 from imagegen.voice_alignment import reference_words,build_report
-from tests import veo_fixture as fixture_module
+from tests import test_veo_animation as fixture_module
 
 
 def pure_fixture():
@@ -168,12 +168,15 @@ class IntegrationTests(unittest.TestCase):
         with self.service.db.transaction() as conn:conn.execute('UPDATE projects SET version=version+1 WHERE id=?',(self.pid,))
         with self.assertRaises(DomainError):self.manager.apply(self.pid,job['id'],{'expected_revision':1})
 
-    def test_audio_replacement_marks_old_fit_stale_and_blocks_export(self):
+    def test_audio_replacement_marks_old_fit_stale_but_exports_current_montage(self):
         job=self.run_proposal();applied=self.manager.apply(self.pid,job['id'],{'expected_revision':1});doc=applied['document']
         upload=self.editor.audio(self.pid,{'filename':'new.wav','data':base64.b64encode(audio_bytes(4.5)).decode()})
         doc['audio_tracks'][0]['asset_id']=upload['asset_id'];saved=self.editor.save(self.pid,{'expected_revision':2,'document':doc})
         self.assertTrue(saved['document']['voice_fit']['stale'])
-        with self.assertRaises(DomainError):self.app.edit_exports.start(self.pid,{'expected_revision':3})
+        with patch('imagegen.export_worker.threading.Thread'):
+            export=self.app.edit_exports.start(self.pid,{'expected_revision':3})
+        row=self.service.db.one('SELECT snapshot FROM edit_exports WHERE id=?',(export['id'],))
+        self.assertEqual(json.loads(row['snapshot']),saved['document'])
 
     def test_rollback_preserves_later_manual_changes_by_refusing_overwrite(self):
         job=self.run_proposal();applied=self.manager.apply(self.pid,job['id'],{'expected_revision':1})

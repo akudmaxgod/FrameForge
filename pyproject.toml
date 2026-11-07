@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frameforge"
-version = "0.2.0rc2"
+version = "0.2.0rc3"
 requires-python = ">=3.12,<3.13"
 description = "Local video preparation and montage workspace"
 dynamic = ["dependencies"]

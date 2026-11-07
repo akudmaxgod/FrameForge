@@ -1,4 +1,5 @@
 // Media library & smart insert proposal UI panel for FrameForge Montage
+import {coverageControls,coverageText} from './media-coverage-controls.mjs';
 
 function node(tag, text, className) {
   const el = document.createElement(tag);
@@ -14,21 +15,33 @@ function button(text, onClick, className = 'montage-btn') {
   return b;
 }
 
-export function mountMediaLibraryButton(toolbar, { projectId, api: appApi, notice, beforeOpen, onManualAdd }) {
+async function animatePhotos(projectId,api,notice,coverage,btn,onDocumentChanged){
+  btn.disabled=true;
+  try{
+    const current=await api(`/api/projects/${projectId}/edit`);
+    const chosen=coverage.getValue().photo_motion;
+    if(chosen==='off')throw Error('Сначала выберите движение в списке «Фото».');
+    const res=await api(`/api/projects/${projectId}/edit/media-photo-motion`,{method:'POST',body:{expected_revision:current.revision,photo_motion:chosen}});
+    if(res.changed_count){onDocumentChanged?.(res.document,res.revision,res.sources);notice(`Движение добавлено к фото-вставкам: ${res.changed_count}.`);}
+    else notice('Нет статичных автоматически добавленных фото. Готовые движения и анимации сохранены.');
+  }catch(e){notice(e.message,true);}finally{btn.disabled=false;}
+}
+
+export function mountMediaLibraryButton(toolbar, { projectId, api: appApi, notice, beforeOpen, onManualAdd, onDocumentChanged }) {
   const api = (path, options) => {
     const route = path.replace(/^\/api/, '');
     if (options?.method === 'DELETE') return appApi(route + '/delete', {});
     return appApi(route, options?.method === 'POST' ? (options.body || {}) : undefined);
   };
   const open = async fn => { try { await beforeOpen?.(); await fn(); } catch(e) { notice(e.message, true); } };
-  const btn = button('📁 Материалы для вставок', () => open(() => openMediaLibraryModal({ projectId, api, notice, onManualAdd })), 'montage-btn montage-media-lib-btn');
-  const matchBtn = button('✨ Подобрать вставки', () => open(() => openMediaMatchModal({ projectId, api, notice })), 'montage-btn montage-btn-accent');
+  const btn = button('📁 Материалы для вставок', () => open(() => openMediaLibraryModal({ projectId, api, notice, onManualAdd, onDocumentChanged })), 'montage-btn montage-media-lib-btn');
+  const matchBtn = button('✨ Подобрать вставки', () => open(() => openMediaMatchModal({ projectId, api, notice, onDocumentChanged })), 'montage-btn montage-btn-accent');
   const stockBtn = button('🔍 Pixabay', () => open(() => openStockSearchModal({ projectId, api, notice, onManualAdd })), 'montage-btn');
   toolbar.append(btn, stockBtn, matchBtn);
   return { libBtn: btn, stockBtn, matchBtn };
 }
 
-export async function openMediaLibraryModal({ projectId, api, notice, onManualAdd }) {
+export async function openMediaLibraryModal({ projectId, api, notice, onManualAdd, onDocumentChanged }) {
   const existing = document.querySelector('.media-library-overlay');
   if (existing) existing.remove();
 
@@ -54,7 +67,7 @@ export async function openMediaLibraryModal({ projectId, api, notice, onManualAd
   const analyzeBtn = button('⚡ Анализировать материалы (Qwen3-VL)', () => runAnalysis(), 'montage-btn montage-btn-accent');
   const openMatchBtn = button('✨ Перейти к подбору вставок', () => {
     overlay.remove();
-    openMediaMatchModal({ projectId, api, notice });
+    openMediaMatchModal({ projectId, api, notice, onDocumentChanged });
   }, 'montage-btn');
 
   const statusSpan = node('span', '', 'media-library-status');
@@ -70,14 +83,107 @@ export async function openMediaLibraryModal({ projectId, api, notice, onManualAd
   try { folderInput.value=localStorage.getItem(pathKey)||''; } catch {}
   const folderStart=button('▶ Подобрать из папки',startFolder,'montage-btn montage-btn-accent');
   const row=node('div',null,'media-folder-row');row.append(folderInput,folderStart);
-  const autoLabel=node('label'),autoApply=node('input');autoApply.type='checkbox';autoApply.checked=true;
-  autoLabel.append(autoApply,document.createTextNode(' Сразу вставить подходящие в монтаж (можно откатить)'));
+  const folderCoverage=coverageControls(projectId);
+  const motionBtn=button('🎞 Оживить фото-вставки',()=>animatePhotos(projectId,api,notice,folderCoverage,motionBtn,onDocumentChanged),'montage-btn');tools.append(motionBtn);
   const folderStatus=node('div','','media-folder-status');folderStatus.setAttribute('role','status');
   const folderErrors=node('div','','media-folder-errors');
-  folderLabel.append(row);folderBox.append(folderLabel,autoLabel,folderStatus,folderErrors);
+  folderLabel.append(row);folderBox.append(folderLabel,folderCoverage.element,folderStatus,folderErrors);
+  const offer=node('div');
+  const placementStatus=node('p','','media-library-status');placementStatus.setAttribute('role','status');
+  const placeNow=button('Расставить кадры под озвучку',placeFromLibrary,'montage-btn montage-btn-primary');
+  const undoKey='frameforge-last-media-placement:'+projectId;
+  const undo=button('Отменить расстановку',async()=>{
+    undo.disabled=true;
+    try{
+      const proposal=localStorage.getItem(undoKey);
+      const result=await api(`/api/projects/${projectId}/edit/media-match/${proposal}/rollback`,{method:'POST'});
+      onDocumentChanged?.(result.document,result.new_revision,result.sources);
+      localStorage.removeItem(undoKey);undo.hidden=true;
+      placementStatus.textContent='Расстановка отменена.';
+    }catch(e){placementStatus.textContent=e.message;undo.disabled=false;}
+  },'montage-btn');
+  undo.hidden=!localStorage.getItem(undoKey);
+  folderBox.append(placeNow,undo,node('p','Вставки могут закрыть 2.5D-фото. Готовые видео и закреплённые кадры защищены.','media-library-status'),placementStatus,offer);
+  async function showMatchingProgress(url, keepPolling){
+    const progress=node('progress');
+    progress.setAttribute('aria-label','Прогресс подбора вставок');
+    placementStatus.after(progress);
+    try{
+      while(keepPolling()&&overlay.isConnected){
+        try{
+          const job=await api(`${url}/progress`);
+          if(!keepPolling()||!overlay.isConnected)return;
+          if(job.state==='running'){
+            const scene=job.current?` · Сцена ${job.current} из ${job.total}`:'';
+            const candidate=job.candidate?` · Кандидат ${job.candidate}`:'';
+            const errors=job.verification_errors?` · Ошибки проверки: ${job.verification_errors}`:'';
+            placementStatus.textContent=`${job.stage}${scene}${candidate} · Совпадений: ${job.confirmed} · ${job.elapsed_seconds} с${errors}`;
+            if(job.total){progress.max=job.total;progress.value=job.processed;}
+          }
+        }catch{}
+        await new Promise(resolve=>setTimeout(resolve,1000));
+      }
+    }finally{progress.remove();}
+  }
+  async function placeFromLibrary(){
+    let matching=false;
+    placeNow.disabled=true;undo.disabled=true;offer.replaceChildren();
+    try{
+      const coverage={...folderCoverage.getValue(),cover_photo_motion:true};
+      const url=`/api/projects/${projectId}/edit/media-match`;
+      placementStatus.textContent='Подбираю кадры к фразам озвучки…';
+      matching=true;
+      const request=api(url,{method:'POST',body:{policy:'balanced',coverage,quick:true}});
+      showMatchingProgress(url,()=>matching);
+      const found=await request;
+      matching=false;
+      if(!found.selection?.selected_proposal_ids?.length){
+        placementStatus.textContent=found.message||'В сохранённых описаниях не найдено достаточно точных совпадений.';
+        return;
+      }
+      if(!overlay.isConnected)return;
+      placementStatus.textContent='Добавляю подтверждённые вставки на таймлайн…';
+      const result=await api(`${url}/${found.proposal_id}/apply`,{method:'POST',body:{coverage}});
+      if(result.applied_count){
+        localStorage.setItem(undoKey,found.proposal_id);
+        onDocumentChanged?.(result.document,result.new_revision,result.sources);
+        undo.hidden=false;
+        placementStatus.textContent=`Расставлено по озвучке: ${result.applied_count}.`;
+      }else{placementStatus.textContent='Нет подтверждённых совпадений в доступных местах. Монтаж сохранён.';}
+    }catch(e){placementStatus.textContent=e.message;}
+    finally{matching=false;placeNow.disabled=folderActive;undo.disabled=false;}
+  }
+  const placed=sessionStorage.getItem(undoKey);
+  if(placed){notice(`${placed} Отмена в «Материалах для вставок».`);sessionStorage.removeItem(undoKey);}
+  async function offerPlacement(proposalId=null){
+    try{
+      const coverage=folderCoverage.getValue();
+      const url=`/api/projects/${projectId}/edit/media-match`;
+      if(!proposalId){const found=await api(url,{method:'POST',body:{policy:'balanced',coverage}});proposalId=found.proposal_id;}
+      const preview=proposalId&&await api(`${url}/${proposalId}/preview`,{method:'POST',body:{coverage}});
+      if(!overlay.isConnected)return;
+      if(!preview?.selected_proposal_ids?.length){offer.replaceChildren(node('p','Подходящего места не найдено с учётом покрытия и защиты анимаций. Материалы оставлены в медиатеке.'));return;}
+      offer.replaceChildren(node('p','Найдены подходящие материалы. Расставить их по смыслу на таймлайне?'));
+      const place=button('Расставить по смыслу',async()=>{
+        place.disabled=true;
+        try{
+          const result=await api(`${url}/${proposalId}/apply`,{method:'POST',body:{coverage:folderCoverage.getValue()}});
+          if(result.applied_count){
+            onDocumentChanged?.(result.document,result.new_revision,result.sources);
+            offer.replaceChildren(node('p',`Расставлено по смыслу: ${result.applied_count}.`));
+            localStorage.setItem(undoKey,proposalId);undo.hidden=false;
+          }
+          else{offer.replaceChildren(node('p','Подходящего места не найдено. Материалы оставлены в медиатеке.'));}
+        }catch(e){notice(e.message,true);}finally{place.disabled=false;}
+      });
+      offer.append(place,button('Позже',()=>offer.replaceChildren()));
+    }catch(e){if(overlay.isConnected)offer.replaceChildren(node('p',e.message));}
+  }
   let folderActive=false,folderWasActive=false;
   function folderBusy(value) {
-    folderActive=value;folderStart.disabled=value;folderInput.disabled=value;autoApply.disabled=value;
+    folderActive=value;folderStart.disabled=value;folderInput.disabled=value;placeNow.disabled=value;
+    folderCoverage.setDisabled(value);
+    motionBtn.disabled=value;
     uploadBtn.disabled=value;analyzeBtn.disabled=value;
   }
   async function startFolder() {
@@ -85,7 +191,7 @@ export async function openMediaLibraryModal({ projectId, api, notice, onManualAd
     folderBusy(true);
     try {
       try {localStorage.setItem(pathKey,folderInput.value.trim());}catch{}
-      await api(`/api/projects/${projectId}/edit/media-folder`,{method:'POST',body:{folder_path:folderInput.value.trim(),recursive:true,auto_apply:autoApply.checked}});
+      await api(`/api/projects/${projectId}/edit/media-folder`,{method:'POST',body:{folder_path:folderInput.value.trim(),recursive:true,coverage:folderCoverage.getValue()}});
       folderWasActive=true;pollFolder();
     }catch(e){folderBusy(false);folderStatus.textContent=e.message;notice(e.message,true);}
   }
@@ -96,12 +202,13 @@ export async function openMediaLibraryModal({ projectId, api, notice, onManualAd
       if(job.state==='idle')return;
       if(!folderInput.value)folderInput.value=job.folder_path||'';
       const active=['queued','running'].includes(job.state);folderBusy(active);
+      if(active&&job.options?.coverage)folderCoverage.setValue(job.options.coverage);
       folderStatus.textContent=`${job.message||'Подготовка…'}${active?' · '+Math.round((job.progress||0)*100)+'%':''}`;
       folderErrors.textContent=(job.errors||[]).map(e=>`${e.file}: ${e.error}`).join('\n');
       if(active){folderWasActive=true;setTimeout(pollFolder,1500);}
       else {
         await loadItems();
-        if(folderWasActive && job.applied_count){window.location.reload();return;}
+        if(folderWasActive&&job.state==='completed'&&job.proposal_id)offerPlacement(job.proposal_id);
         folderWasActive=false;
       }
     }catch(e){folderStatus.textContent='Не удалось получить состояние: '+e.message;if(folderActive)setTimeout(pollFolder,3000);}
@@ -253,7 +360,7 @@ export async function openMediaLibraryModal({ projectId, api, notice, onManualAd
         progressBox.style.display = 'none';
         analyzeBtn.disabled = false;
         if (job.state === 'completed' && !job.error) {
-          notice('Анализ медиатеки успешно завершён!');
+          notice('Анализ медиатеки успешно завершён!');offerPlacement();
         } else if (job.state === 'failed' || job.error) {
           notice(`Ошибка анализа: ${job.error || 'неизвестная ошибка'}`, true);
         }
@@ -272,7 +379,7 @@ export async function openMediaLibraryModal({ projectId, api, notice, onManualAd
   }
 }
 
-export async function openMediaMatchModal({ projectId, api, notice }) {
+export async function openMediaMatchModal({ projectId, api, notice, onDocumentChanged }) {
   const existing = document.querySelector('.media-match-overlay');
   if (existing) existing.remove();
 
@@ -292,13 +399,16 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
   applyBtn.style.display = 'none';
 
   tools.append(generateBtn, applyBtn, rollbackBtn);
+  const coverage=coverageControls(projectId,{onChange:()=>refreshPreview(true)});
+  const motionBtn=button('🎞 Оживить фото-вставки',()=>animatePhotos(projectId,api,notice,coverage,motionBtn),'montage-btn');tools.append(motionBtn);
+  const coverageSummary=node('div','Выберите долю ролика и рассчитайте подбор.','media-coverage-summary');coverageSummary.setAttribute('role','status');
 
   const list = node('div', null, 'media-match-list');
   list.style.flex = '1';
   list.style.overflowY = 'auto';
   list.style.padding = '20px';
 
-  modal.append(header, tools, list);
+  modal.append(header, coverage.element, coverageSummary, tools, list);
   document.body.append(overlay);
 
   overlay.addEventListener('click', (e) => {
@@ -314,10 +424,31 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
 
   let currentProposalId = null;
   const selectedProposalIds = new Set();
+  const checkboxes = new Map();
+  const protectedSelections=new Set();
+  let previewSequence=0,previewReady=false;
 
-  function renderProposals(proposals) {
+  async function refreshPreview(automatic=false){
+    if(!currentProposalId)return;
+    const sequence=++previewSequence;previewReady=false;applyBtn.disabled=true;
+    try{
+      const res=await api(`/api/projects/${projectId}/edit/media-match/${currentProposalId}/preview`,{method:'POST',body:{coverage:coverage.getValue(),accepted_proposal_ids:automatic?null:[...selectedProposalIds]}});
+      if(sequence!==previewSequence||!overlay.isConnected)return;
+      selectedProposalIds.clear();for(const id of res.selected_proposal_ids)selectedProposalIds.add(id);
+      for(const [id,checkbox] of checkboxes){
+        checkbox.checked=selectedProposalIds.has(id);
+        const reason=res.skipped?.[id];
+        if(['animated','locked','existing_footage','changed_segment','excluded'].includes(reason))protectedSelections.add(id);
+        if(protectedSelections.has(id)){checkbox.disabled=true;checkbox.title=reason==='animated'?'Готовая анимация защищена от вставок.':'Кадр защищён или уже содержит вставку.';}
+      }
+      coverageSummary.textContent=coverageText(res);previewReady=true;applyBtn.disabled=!selectedProposalIds.size;
+    }catch(e){if(sequence===previewSequence){coverageSummary.textContent=e.message;notice(e.message,true);}}
+  }
+
+  async function renderProposals(proposals) {
     list.innerHTML = '';
     selectedProposalIds.clear();
+    checkboxes.clear();protectedSelections.clear();previewReady=false;
 
     if (!proposals || !proposals.length) {
       list.innerHTML = '<div class="media-library-empty">Нет предложений вставок. Убедитесь, что материалы загружены и проанализированы через Qwen3-VL.</div>';
@@ -343,9 +474,13 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
       const chk = node('input');
       chk.type = 'checkbox';
       chk.checked = p.match_status === 'matched';
+      chk.disabled=p.match_status==='rejected';
+      chk.setAttribute('aria-label','Вставка: '+p.phrase_quote);
+      checkboxes.set(p.proposal_id,chk);
       chk.onchange = () => {
         if (chk.checked) selectedProposalIds.add(p.proposal_id);
         else selectedProposalIds.delete(p.proposal_id);
+        refreshPreview(false);
       };
 
       // Thumbnail
@@ -403,15 +538,16 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
       item.append(chk, thumb, body);
       list.append(item);
     }
+    await refreshPreview(true);
   }
 
   async function generateProposals() {
     generateBtn.disabled = true;
     list.innerHTML = '<div class="media-library-empty">Сопоставление фраз озвучки с визуальными образами...</div>';
     try {
-      const res = await api(`/api/projects/${projectId}/edit/media-match`, { method: 'POST', body: { policy: 'balanced' } });
+      const res = await api(`/api/projects/${projectId}/edit/media-match`, { method: 'POST', body: { policy: 'balanced',coverage:coverage.getValue() } });
       currentProposalId = res.proposal_id;
-      renderProposals(res.proposals);
+      await renderProposals(res.proposals);
       notice(`Найдено предложений вставок: ${res.total_proposals}`);
     } catch (e) {
       notice(e.message, true);
@@ -421,7 +557,7 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
   }
 
   async function applySelected() {
-    if (!currentProposalId || !selectedProposalIds.size) {
+    if (!currentProposalId || !previewReady || !selectedProposalIds.size) {
       notice('Выберите хотя бы одну вставку для применения.', true);
       return;
     }
@@ -429,11 +565,12 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
     try {
       const res = await api(`/api/projects/${projectId}/edit/media-match/${currentProposalId}/apply`, {
         method: 'POST',
-        body: { accepted_proposal_ids: [...selectedProposalIds] }
+        body: { accepted_proposal_ids: [...selectedProposalIds],coverage:coverage.getValue() }
       });
+      if(res.status==='no_changes'){coverageSummary.textContent=coverageText(res);notice('Новые вставки не добавлены. Проверьте лимит и защищённые кадры.');return;}
       notice(`Успешно применены вставки: ${res.applied_count}. Создана ревизия монтажа ${res.new_revision}.`);
+      onDocumentChanged?.(res.document,res.new_revision,res.sources);
       overlay.remove();
-      window.location.reload();
     } catch (e) {
       notice(e.message, true);
     } finally {
@@ -453,8 +590,8 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
     try {
       const res = await api(`/api/projects/${projectId}/edit/media-match/${currentProposalId}/rollback`, { method: 'POST' });
       notice(`Монтаж успешно откатан к исходной версии. Текущая ревизия: ${res.new_revision}.`);
+      onDocumentChanged?.(res.document,res.new_revision,res.sources);
       overlay.remove();
-      window.location.reload();
     } catch (e) {
       notice(e.message, true);
     }
@@ -464,7 +601,7 @@ export async function openMediaMatchModal({ projectId, api, notice }) {
     const existing = await api(`/api/projects/${projectId}/edit/media-match`);
     if (existing && existing.proposals && existing.proposals.length) {
       currentProposalId = existing.id;
-      renderProposals(existing.proposals);
+      await renderProposals(existing.proposals);
     }
   } catch (e) {}
 }

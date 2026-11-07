@@ -1,4 +1,4 @@
-"""Local folder -> library -> visual analysis -> proposals -> approved auto inserts."""
+"""Local folder -> library -> visual analysis -> proposals -> reviewable suggestions."""
 import json
 import hashlib
 import threading
@@ -50,7 +50,9 @@ class MediaFolderWorkflow:
         if not value or not folder.is_absolute() or not folder.is_dir():
             raise DomainError('Укажите полный путь к существующей папке на этом компьютере.')
         folder = folder.resolve()
-        options = {'placement_policy':'whole-narration-segment/1', 'recursive':bool(data.get('recursive',True)), 'auto_apply':bool(data.get('auto_apply',False)),
+        from .insert_coverage import policy as coverage_policy
+        options = {'placement_policy':'whole-narration-segment/1', 'recursive':bool(data.get('recursive',True)), 'auto_apply':False,
+                   'coverage':coverage_policy(data.get('coverage')),
                    'voice_hash':self.service.media_matching.compute_voice_hash(project_id)}
         with self.lock:
             active = self.db.one("SELECT * FROM media_folder_jobs WHERE project_id=? AND state IN ('queued','running') LIMIT 1", (project_id,))
@@ -78,7 +80,7 @@ class MediaFolderWorkflow:
             previous=self.db.one("SELECT * FROM media_folder_jobs WHERE project_id=? AND id!=? AND state='completed' ORDER BY created_at DESC LIMIT 1",(pid,jid))
             if previous and not json.loads(previous['errors_json']):
                 old=json.loads(previous['options_json'])
-                same=all(old.get(k)==options.get(k) for k in ('folder_signature','voice_hash','auto_apply','recursive','placement_policy'))
+                same=all(old.get(k)==options.get(k) for k in ('folder_signature','voice_hash','auto_apply','recursive','placement_policy','coverage'))
                 if same and previous['folder_path']==str(folder) and old.get('completed_edit_revision')==revision:
                     self._update(jid,state='completed',step='complete',progress=1,total_files=len(files),processed_files=len(files),reused_files=len(files),proposal_id=previous['proposal_id'],options_json=previous['options_json'],message='Эта папка уже обработана. Повторные вставки не добавлены.')
                     return
@@ -106,25 +108,16 @@ class MediaFolderWorkflow:
                 raise DomainError(job.get('error') or 'Анализ материалов прерван.')
             if job.get('error'): errors.append({'file':'Анализ','error':job['error']})
             self._update(jid,step='matching',progress=.8,message='Подбираю вставки к фразам сценария…',errors_json=dump(errors))
-            proposal=self.service.media_matching.propose_inserts(pid,{'policy':'balanced'})
+            proposal=self.service.media_matching.propose_inserts(pid,{'policy':'balanced','coverage':options['coverage']})
             proposal_id=proposal.get('proposal_id')
             self._update(jid,proposal_id=proposal_id)
             accepted=[p['proposal_id'] for p in proposal.get('proposals',[]) if p.get('match_status')=='matched']
-            applied=0
-            message=f"Подобрано вставок: {len(proposal.get('proposals',[]))}."
-            unchanged=(self.service.editing.get(pid)['revision']==revision and self.service.media_matching.compute_voice_hash(pid)==options['voice_hash'])
-            if options['auto_apply'] and accepted and unchanged and not errors:
-                self._update(jid,step='applying',progress=.95,message='Вставляю подходящие футажи в монтаж…')
-                result=self.service.montage_inserts.apply_proposals(pid,proposal_id,accepted)
-                applied=result.get('applied_count',0)
-                message=f'Готово. Вставлено: {applied}. Остальные предложения доступны для просмотра.'
-            elif options['auto_apply'] and not unchanged:
-                message+=' Монтаж или озвучка изменились во время обработки. Автовставка пропущена; просмотрите предложения.'
-            elif errors:
-                message+=' Есть ошибки обработки; автоматическая вставка пропущена. Просмотрите предложения и ошибки.'
-            elif not accepted:
-                message+=' Полных совпадений для автоматической вставки нет.'
+            message=f"Подобрано вставок: {len(accepted)}."
+            if not accepted:
+                message+=' Подходящего места не найдено. Материалы оставлены в медиатеке.'
+            if errors:
+                message+=' Некоторые файлы не удалось обработать; подробности в списке ошибок.'
             options['completed_edit_revision']=self.service.editing.get(pid)['revision']
-            self._update(jid,state='completed',step='complete',progress=1,applied_count=applied,message=message,errors_json=dump(errors),options_json=dump(options))
+            self._update(jid,state='completed',step='complete',progress=1,applied_count=0,message=message,errors_json=dump(errors),options_json=dump(options))
         except Exception as e:
             self._update(jid,state='failed',message=str(e),errors_json=dump(errors))

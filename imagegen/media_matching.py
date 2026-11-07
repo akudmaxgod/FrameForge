@@ -13,8 +13,12 @@ import logging
 import math
 import os
 import re
+import threading
+import time
 import urllib.request
 import urllib.error
+from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -24,6 +28,7 @@ from .editing import normalize
 
 logger = logging.getLogger(__name__)
 
+@lru_cache(maxsize=32768)
 def stem_ru(word: str) -> str:
     w = word.lower()
     if len(w) <= 3:
@@ -115,10 +120,73 @@ def calculate_match_score(phrase_tokens: set, segment: Dict[str, Any]) -> float:
     return min(1.0, round(score, 3))
 
 
+DESCRIPTION_STOP_WORDS = {
+    stem_ru(word) for word in (
+        'кадр сцена персонаж человек мужчина женщина момент контекст атмосфера '
+        'подчеркивает передает подходит идеально использовать установочный акцент '
+        'драматический эмоциональный визуальный монтаж фото изображение '
+        'который своих своего можно снова стало вокруг затем только всегда после перед '
+        'черный темный светлый снег снежный белый фон стоит сидит смотрит '
+        'который другой один между двое прямо вперед холодный тяжелый люди план'
+    ).split()
+}
+
+
+def description_terms(text):
+    return {
+        stem for word in re.findall(r'[^\W\d_]+', text.lower().replace('ё', 'е'))
+        if len(word) >= 4 and (stem := stem_ru(word)) not in DESCRIPTION_STOP_WORDS
+    }
+
+
+def description_pairs(text):
+    words = re.findall(r'[^\W\d_]+', text.lower().replace('ё', 'е'))
+    return {(stem_ru(a), stem_ru(b)) for a, b in zip(words, words[1:])
+            if len(a) >= 4 and len(b) >= 4}
+
+
+
+def description_index(segments):
+    index = []
+    frequencies = Counter()
+    for segment in segments:
+        text = ' '.join([
+            segment.get('analysis_summary') or '', segment.get('dominant_subject') or '',
+            *map(str, segment.get('objects', [])), *map(str, segment.get('actions', []))
+        ])
+        terms = description_terms(text)
+        index.append((segment, terms, description_pairs(text)))
+        frequencies.update(terms)
+    weights = {term: 1 + math.log((1 + len(index)) / (1 + count))
+               for term, count in frequencies.items()}
+    return index, weights
+
+
+def rank_descriptions(phrase, index, weights):
+    terms = description_terms(phrase)
+    maximum = sum(weights.get(term, 1) for term in terms)
+    if not maximum:
+        return []
+    ranked = []
+    pairs = description_pairs(phrase)
+    for segment, description, media_pairs in index:
+        overlap = terms & description
+        if len(index) >= 4 and sum(weights[term] >= 2 for term in overlap) < 2:
+            continue
+        shared_pair = any(a in overlap and b in overlap for a, b in pairs & media_pairs)
+        if len(overlap) < 3 and not shared_pair:
+            continue
+        score = sum(weights[term] for term in overlap) / maximum
+        if score >= .40:
+            ranked.append((score, segment, sorted(overlap)))
+    return sorted(ranked, key=lambda row: -row[0])
+
+
 def evaluate_candidate_alignment(
     phrase: str,
     segment: Dict[str, Any],
-    character_names: Optional[set] = None
+    character_names: Optional[set] = None,
+    *, has_description_evidence: bool = False
 ) -> Dict[str, Any]:
     """
     Evaluates whether a candidate visual segment aligns with the narration phrase.
@@ -276,7 +344,7 @@ def evaluate_candidate_alignment(
     seg_tokens = tokenize_words(" ".join(seg_items))
     has_direct_overlap = bool(phrase_tokens.intersection(seg_tokens))
 
-    if raw_score >= 0.45:
+    if has_description_evidence or raw_score >= 0.45:
         return {
             "status": "matched",
             "status_label": "подходит",
@@ -405,7 +473,7 @@ def _verify_candidate_with_qwen(
         "{\n"
         '  "status": "matched" | "needs_review" | "rejected",\n'
         '  "status_label": "подходит" | "нужна проверка" | "совпадение не найдено",\n'
-        '  "reason": "Конкретная причина на русском языке с указанием несовпадения действия или субъекта"\n'
+        '  "reason": "Краткая причина на русском, до 12 слов"\n'
         "}"
     )
 
@@ -470,7 +538,7 @@ def _verify_candidate_with_qwen(
             {"role": "user", "content": user_content}
         ],
         "temperature": 0.1,
-        "max_tokens": 256,
+        "max_tokens": 512,
         "response_format": {"type": "json_object"}
     }
 
@@ -508,6 +576,19 @@ class MediaMatching:
     def __init__(self, service):
         self.service = service
         self.db = service.db
+        self._progress_lock = threading.Lock()
+        self._progress = {}
+
+    def progress(self, project_id):
+        with self._progress_lock:
+            job = self._progress.get(project_id)
+            if not job:
+                return {'state': 'idle'}
+            return {**job, 'elapsed_seconds': int(time.monotonic() - job['started_at'])}
+
+    def _report(self, project_id, **fields):
+        with self._progress_lock:
+            self._progress[project_id].update(fields)
 
     def compute_voice_hash(self, project_id: str) -> str:
         """Computes a content hash representing the voice track and scene narration quotes."""
@@ -534,10 +615,32 @@ class MediaMatching:
         return hashlib.sha256(";".join(content_parts).encode("utf-8")).hexdigest()
 
     def propose_inserts(self, project_id: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Generates smart montage insert proposals for the project without applying them."""
+        """Calculate proposals without applying them and expose progress to the UI."""
         self.service.project(project_id)
+        with self._progress_lock:
+            if self._progress.get(project_id, {}).get('state') == 'running':
+                raise DomainError('Подбор для этого проекта уже выполняется.', 409)
+            self._progress[project_id] = {
+                'state': 'running', 'stage': 'Подготавливаю таймлайн',
+                'started_at': time.monotonic(), 'processed': 0, 'total': 0,
+                'confirmed': 0, 'verification_errors': 0,
+            }
+        try:
+            result = self._propose_inserts(project_id, options)
+        except Exception:
+            self._report(project_id, state='failed', stage='Подбор остановлен')
+            raise
+        self._report(project_id, state='completed', stage='Расчёт завершён')
+        return result
+
+    def _propose_inserts(self, project_id, options):
         opts = options or {}
+        quick = opts.get('quick') is True
         max_ratio = float(opts.get("max_insert_ratio", 1.0))
+        from .insert_coverage import policy as coverage_policy, animated_scene_ids, protected_reason, select as select_coverage
+        coverage = coverage_policy(opts.get('coverage'))
+        animated = animated_scene_ids(self.service, project_id, coverage)
+        cover_photo_motion = coverage.get('cover_photo_motion', False)
 
         # 1. Get current montage edit and normalized timeline
         edit = self.service.editing.get(project_id)
@@ -592,13 +695,30 @@ class MediaMatching:
         accumulated_insert_ms = 0.0
 
         from .media_segment_placement import logical_segments,source_window,POLICY
-        for clip in logical_segments(doc,timeline):
-            if clip.get('footage_overlay') or clip.get('media_replacement_locked') or clip.get("excluded") or clip.get("source_kind") == "footage":
-                continue
+        base_clips = {c['edit_clip_id']: c for c in doc['clips']}
+        eligible = [
+            clip for clip in logical_segments(doc, timeline)
+            if not any(protected_reason(base_clips[cid], animated, cover_photo_motion=cover_photo_motion)
+                       for cid in clip['replace_clip_ids'])
+        ]
+        self._report(project_id, total=len(eligible))
+        confirmed = verification_errors = processed = 0
+        media_index, term_weights = description_index(segments) if quick else ([], {})
+        for index, clip in enumerate(eligible):
+            processed = index + 1
+            self._report(project_id, processed=index, current=index + 1, candidate=0,
+                         stage='Ищу материалы для фразы')
 
             scene_id = clip.get("scene_id")
             sdata = scene_data_map.get(scene_id, {})
             phrase = sdata.get("source_quote") or sdata.get("beat") or sdata.get("text") or ""
+            fit = doc.get('voice_fit') or {}
+            if not fit.get('stale') and fit.get('phrase_alignment'):
+                base = base_clips[clip['replace_clip_ids'][0]]
+                binding = base.get('semantic_source_binding') or {}
+                if (binding.get('audio_sha256') == (fit.get('audio_binding') or {}).get('sha256')
+                        and (binding.get('reviewed') or binding.get('needs_review') is False)):
+                    phrase = binding.get('narration') or phrase
             if not phrase:
                 continue
 
@@ -608,11 +728,24 @@ class MediaMatching:
             # 1. Initial semantic scoring and conflict filtering
             scored_candidates = []
             phrase_toks = tokenize_words(phrase)
-            for seg in segments:
+            if quick:
+                candidates = rank_descriptions(phrase, media_index, term_weights)
+            else:
+                candidates = ((None, segment, []) for segment in segments)
+            for description_score, seg, evidence in candidates:
                 item_id = seg["item_id"]
                 if usage_counts.get(item_id, 0) >= 2:
                     continue
 
+                if quick:
+                    pre_eval = evaluate_candidate_alignment(phrase, seg, character_names,
+                                                           has_description_evidence=True)
+                    if pre_eval['status'] == 'matched':
+                        pre_eval['reason'] = 'Совпадение по сохранённому описанию: ' + ', '.join(evidence)
+                        scored_candidates.append((description_score, seg, pre_eval))
+                    if len(scored_candidates) >= 3:
+                        break
+                    continue
                 pre_eval = evaluate_candidate_alignment(phrase, seg, character_names)
                 score = calculate_match_score(phrase_toks, seg)
                 if pre_eval["status"] == "rejected":
@@ -627,13 +760,18 @@ class MediaMatching:
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
 
             # 2. Deep contextual verification of top candidates using local Qwen3-VL
-            for score, seg, pre_eval in scored_candidates[:3]:
+            for candidate, (score, seg, pre_eval) in enumerate(scored_candidates[:3], 1):
+                stage = 'Сверяю сохранённое описание' if quick else 'Проверяю кандидата в Qwen3-VL'
+                self._report(project_id, candidate=candidate, stage=stage)
                 if seg.get('media_type')=='video' and clip['duration_ms']<2500:continue
                 try:seg=source_window(self.service,seg,clip['duration_ms'])
                 except Exception as error:
                     logger.warning('Cannot prepare full-segment source: %s',error)
                     continue
                 if seg is None:continue
+                if quick:
+                    best_candidate, best_eval = seg, pre_eval
+                    break
                 if self.service:
                     try:
                         keyframes = json.loads(seg.get("keyframe_paths_json") or "[]")
@@ -643,6 +781,8 @@ class MediaMatching:
                         if pre_eval["status"] == "needs_review" and "геро" in pre_eval.get("reason", "").lower() and eval_res["status"] == "matched":
                             eval_res = copy.deepcopy(pre_eval)
                     except Exception as e:
+                        verification_errors += 1
+                        self._report(project_id, verification_errors=verification_errors)
                         logger.warning("Qwen verification fallback: %s", e)
                         eval_res = copy.deepcopy(pre_eval)
                         if eval_res.get("status") == "matched":
@@ -681,6 +821,9 @@ class MediaMatching:
                 accumulated_insert_ms += insert_dur
                 usage_counts[best_candidate["item_id"]] = usage_counts.get(best_candidate["item_id"], 0) + 1
 
+                if best_eval['status'] == 'matched':
+                    confirmed += 1
+                    self._report(project_id, confirmed=confirmed)
                 proposals.append({
                     "proposal_id": uid(),
                     "edit_clip_id": clip["edit_clip_id"],
@@ -708,10 +851,13 @@ class MediaMatching:
                         "media_duration_ms": best_candidate.get("media_duration_ms",0)
                     },
                     "match_status": best_eval["status"],
+                    "match_method": "saved_description" if quick else "visual_verification",
+                    "retrieval_score": score if quick else calculate_match_score(phrase_toks, best_candidate),
                     "status_label": best_eval["status_label"],
                     "reason": best_eval["reason"]
                 })
 
+        self._report(project_id, processed=processed, current=0, candidate=0, stage='Сохраняю подбор')
         proposal_record = {
             "id": uid(),
             "project_id": project_id,
@@ -741,5 +887,9 @@ class MediaMatching:
             "base_edit_revision": base_revision,
             "voice_binding_hash": voice_binding_hash,
             "total_proposals": len(proposals),
-            "proposals": proposals
+            "checked_scenes": processed,
+            "eligible_scenes": len(eligible),
+            "partial": processed < len(eligible),
+            "proposals": proposals,
+            "selection": select_coverage(doc, proposals, coverage, scene_ids=animated)
         }

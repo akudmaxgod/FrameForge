@@ -50,7 +50,7 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   const heading=node('h2','Монтаж');root.append(heading,toolbar);
   const disclosure=(title,content,cls='')=>{const d=node('details',undefined,'montage-disclosure '+cls);d.append(node('summary',title),content);return d;};
   const more=node('div',undefined,'montage-more-actions'),morePanel=disclosure('Ещё',more,'montage-more');
-  let selected=s.doc.clips[0]?.edit_clip_id,selectedKind='video',selectedLayer='footage',page=0,disposed=false,job,timer,lanes;
+  let selected=null,selectedKind='video',selectedLayer='footage',page=0,disposed=false,job,timer,lanes;
   const stage=node('div',undefined,'montage-stage'),top=node('div',undefined,'montage-top'),inspector=node('aside',undefined,'montage-inspector'),preview=node('div');
   const controls=node('div',undefined,'montage-toolbar'),clock=node('span','0.00 с'),seek=node('input');seek.type='range';seek.min=0;seek.step=1;seek.setAttribute('aria-label','Время монтажа');
   const play=button('▶ Воспроизвести',()=>player.playing?player.pause():player.play());
@@ -117,25 +117,36 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   async function addLibraryItem(item){
     player.pause();
     const target=selected;
+    if(selectedKind!=='video'||!s.doc.clips.some(c=>c.edit_clip_id===target&&!c.excluded&&c.source_kind!=='footage'))throw Error('Выберите кадр на таймлайне для ручной вставки.');
     const result=await api(`/projects/${id}/edit/media-library/${item.id}/clip`,{});
-    edit(doc=>{if(!overlayFootage(doc,target,result.clip)){doc.clips.push(result.clip);selected=result.clip.edit_clip_id;}selectedKind='video';selectedLayer='footage';});
+    edit(doc=>{if(!overlayFootage(doc,target,result.clip))throw Error('Выбранный кадр изменился. Выберите место вставки снова.');selectedKind='video';selectedLayer='footage';});
     await flush(s);notice('Материал добавлен вручную. Изменение можно отменить.');
   }
-  const footageInput=node('input');footageInput.type='file';footageInput.accept='.png,.jpg,.jpeg,.webp,.bmp,.mp4,.mov,.m4v,.mkv,.webm';footageInput.multiple=true;footageInput.hidden=true;
-  const addFootage=button('Добавить фото / видео',()=>footageInput.click());
+  const footageInput=node('input');footageInput.type='file';footageInput.accept='.png,.jpg,.jpeg,.webp,.bmp,.mp4,.mov,.m4v,.mkv,.webm';footageInput.hidden=true;
+  const manualTarget=()=>selectedKind==='video'&&s.doc.clips.find(c=>c.edit_clip_id===selected&&!c.excluded&&c.source_kind!=='footage');
+  const addFootage=button('Добавить фото / видео',()=>{if(!manualTarget())throw Error('Выберите кадр на таймлайне для ручной вставки.');footageInput.click();});
   footageInput.onchange=async()=>{
-    const files=[...footageInput.files];if(!files.length)return;addFootage.disabled=true;player.pause();let imported=0;
-    const firstTarget=s.doc.clips.findIndex(c=>c.edit_clip_id===selected);const overlayTargets=s.doc.clips.slice(Math.max(0,firstTarget)).filter(c=>c.source_kind!=='footage').map(c=>c.edit_clip_id);
-    try{for(const file of files){
+    const file=footageInput.files[0];if(!file)return;
+    addFootage.disabled=true;player.pause();
+    try{
+      const target=manualTarget()?.edit_clip_id;
+      if(!target)throw Error('Выберите кадр на таймлайне для ручной вставки.');
       if(file.size>512000000)throw Error(`${file.name}: файл должен быть не больше 512 МБ.`);
-      addFootage.textContent=`Импорт ${imported+1} / ${files.length}…`;
       const result=await api(`/projects/${id}/edit/video`,file);
-      edit(doc=>{if(!overlayFootage(doc,overlayTargets[imported],result.clip)){const index=doc.clips.findIndex(c=>c.edit_clip_id===selected);doc.clips.splice(index<0?doc.clips.length:index+1,0,result.clip);selected=result.clip.edit_clip_id;}selectedKind='video';selectedLayer='footage';});imported++;
-    }await flush(s);notice(`Добавлено футажей: ${imported}. Футаж наложен на выбранный исходный кадр; звук выключен.`);
-    }catch(e){notice(e.message,true);}finally{addFootage.disabled=false;addFootage.textContent='Добавить фото / видео';footageInput.value='';}
+      edit(doc=>{if(!overlayFootage(doc,target,result.clip))throw Error('Выбранный кадр изменился. Выберите место вставки снова.');selectedKind='video';selectedLayer='footage';});
+      await flush(s);notice('Футаж наложен на выбранный кадр. Изменение можно отменить.');
+    }catch(e){notice(e.message,true);}finally{addFootage.disabled=false;footageInput.value='';}
   };
   toolbar.append(addFootage,footageInput);
-  mountMediaLibraryButton(toolbar, { projectId: id, api, notice, onManualAdd:addLibraryItem, beforeOpen: async()=>{player.pause();await flush(s);} });
+  function onDocumentChanged(newDoc,newRev,sources){
+      s.history.push(copy(s.doc));s.future=[];
+      if(sources)s.sources=sources;
+      s.doc = newDoc;
+      s.revision = newRev;
+      s.dirty = false;
+      render();
+    }
+  mountMediaLibraryButton(toolbar, { projectId: id, api, notice, onManualAdd:addLibraryItem, onDocumentChanged, beforeOpen: async()=>{player.pause();await flush(s);} });
   mountMaterialSearchButton(toolbar, {
     projectId: id,
     api,
@@ -145,21 +156,14 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
       const clip = s.doc.clips.find(c => c.edit_clip_id === selected);
       const scene = sceneMap.get(clip?.scene_id)?.data;
       return {
-        clip_id: clip?.source_kind === 'footage' ? null : clip?.edit_clip_id,
+        clip_id: manualTarget()?.edit_clip_id || null,
         expected_revision: s.revision,
         quote: scene?.source_quote || '',
         search_text: scene?.source_quote || scene?.beat || '',
       };
     },
     onManualAdd: addLibraryItem,
-    onDocumentChanged: (newDoc, newRev, sources) => {
-      s.history.push(copy(s.doc));s.future=[];
-      if(sources)s.sources=sources;
-      s.doc = newDoc;
-      s.revision = newRev;
-      s.dirty = false;
-      render();
-    }
+    onDocumentChanged
   });
   toolbar.append(button('Добавить готовые сцены',()=>sync(true)),button('Обновить все источники',()=>sync(false)),button('Сохранить',()=>flush(s)),button('↶ Отменить',()=>undo()),button('↷ Повторить',()=>redo()),status);
   more.append(button('Перечитать с сервера',async()=>{if(s.dirty){try{localStorage.setItem(key(id)+':recovery',JSON.stringify(s.doc));}catch{}}const result=await api(`/projects/${id}/edit`);s.doc=result.document;s.revision=result.revision;s.sources=result.sources;s.lastExport=result.last_export_id;s.conflict=false;s.dirty=false;s.error='';s.history=[];s.future=[];localStorage.removeItem(key(id));render();showJob();notice('Монтаж перечитан. Предыдущий несохранённый черновик оставлен в резервной копии браузера.');}));
@@ -167,17 +171,17 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   for(const b of [...toolbar.querySelectorAll('button')]){if(['Обновить все источники'].includes(b.textContent))more.prepend(b);}
   toolbar.append(morePanel);
   const sceneMap=new Map(project.scenes.map(scene=>[scene.id,scene]));
-  const fitHost=node('div'),fitPanel=disclosure('Подогнать под озвучку',fitHost,'montage-fit-settings');root.insertBefore(fitPanel,sceneList);
+  const fitHost=node('div',undefined,'montage-fit-settings');
   const editorBody=node('div',undefined,'montage-editor-body'),library=node('aside',undefined,'montage-library'),libraryTabs=node('div',undefined,'montage-library-tabs');
   library.setAttribute('aria-label','Материалы проекта');libraryTabs.setAttribute('role','tablist');libraryTabs.setAttribute('aria-label','Инструменты монтажа');
   const transitionPane=node('div',undefined,'montage-transition-pane');
-  const panels={media:sceneList,audio:audioPanel,transitions:transitionPane,fit:fitPanel},tabButtons={};
+  const panels={media:sceneList,audio:audioPanel,transitions:transitionPane,fit:fitHost},tabButtons={};
   const activateLibrary=name=>{for(const [key,panel] of Object.entries(panels)){panel.hidden=key!==name;tabButtons[key].setAttribute('aria-selected',String(key===name));}};
   for(const [name,label] of [['media','Медиа'],['audio','Звук'],['transitions','Переходы'],['fit','Подгонка']]){
    const tab=button(label,()=>activateLibrary(name));tab.setAttribute('role','tab');tab.id='montage-tab-'+name;tab.setAttribute('aria-controls','montage-panel-'+name);tabButtons[name]=tab;libraryTabs.append(tab);
    const panel=panels[name];panel.id='montage-panel-'+name;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',tab.id);if(panel.tagName==='DETAILS')panel.open=true;
   }
-  library.append(libraryTabs,sceneList,audioPanel,transitionPane,fitPanel);activateLibrary('media');
+  library.append(libraryTabs,sceneList,audioPanel,transitionPane,fitHost);activateLibrary('media');
   inspectorPanel.open=true;inspectorPanel.setAttribute('aria-label','Свойства выбранного клипа');
   const resizerLeft=node('div',undefined,'montage-resizer montage-resizer-left');
   resizerLeft.setAttribute('role','separator');resizerLeft.setAttribute('aria-label','Изменить ширину левой панели');resizerLeft.title='Потяните для изменения ширины (двойной клик — сброс)';

@@ -3,6 +3,7 @@ import {STYLE_PRESETS, MODES, titleFromStory, clampSceneCount, presetForStyle, M
 import {mountMontage} from './montage-editor.mjs';
 import {smartMotion} from './smart-motion.mjs';
 import {beginAnimationRun,animationRunProgress} from './animation-completion.mjs';
+import {pendingCloudAnimation,animationLaunchPlan} from './animation-launch.mjs';
 import {voiceDraft,voicePlan,startVoiceProject} from './voice-workflow.mjs';
 import {sourceReviewPanel} from './source-review-panel.mjs';
 import {catalogControls} from './catalog-controls.mjs';
@@ -154,7 +155,7 @@ function updateInterruptedAnimation(run,progress){
   if(existing)return;
   const pid=current,box=el('section',undefined,'animation-completion warning');box.id='animation-interrupted';box.dataset.testid='animation-interrupted';box.setAttribute('role','status');box.setAttribute('aria-live','polite');
   box.append(el('strong','⚠ Анимация приостановлена'),el('p',`Готово ${progress.completed.length} из ${progress.total}. ${bridge.status}. Готовые клипы сохранены.`));
-  const actions=el('div');actions.append(button('Продолжить в Flow',async()=>{await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:progress.pending.map(s=>s.scene_id)});box.remove();showNotice('Продолжение очереди отправлено в Flow.');},'primary','animation-interrupted-resume'),button('Скрыть',()=>box.remove(),'secondary'));
+  const actions=el('div');actions.append(button('Продолжить в Flow',async()=>{await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:progress.pending.map(s=>s.scene_id),animations_only:true});box.remove();showNotice('Продолжение очереди отправлено в Flow.');},'primary','animation-interrupted-resume'),button('Скрыть',()=>box.remove(),'secondary'));
   box.append(actions);document.body.append(box);
 }
 let stillApprovalBusy=false,stillApprovalProgress='';
@@ -194,12 +195,13 @@ function omniSelection(){
 function storeOmniSelection(){try{localStorage.setItem('frameforge-omni-selection:'+current,JSON.stringify([...omniSelection()]));}catch{}updateAnimationSelectionSummary();}
 function updateAnimationSelectionSummary(){
   const scenes=project.scenes.filter(s=>!animationLocked(s)),selected=scenes.filter(s=>omniSelection().has(s.id)).length;
-  const label=document.querySelector('[data-testid=animation-selection-summary]');if(label)label.textContent=`${animationModelName(selectedAnimationEngine())}: ${selected} · 2.5D: ${scenes.length-selected} · готовые / запущенные: ${project.scenes.length-scenes.length}`;
+  const queued=project.scenes.filter(s=>pendingCloudAnimation(s)&&omniSelection().has(s.id)).length;
+  const label=document.querySelector('[data-testid=animation-selection-summary]');if(label)label.textContent=`${animationModelName(selectedAnimationEngine())}: ${selected+queued} · 2.5D: ${scenes.length-selected} · готовые / запущенные: ${project.scenes.length-scenes.length}`+(queued?` · продолжить: ${queued}`:'');
   renderAnimationBudget();
 }
 function renderAnimationBudget(){
   let box=document.querySelector('#animation-budget');
-  const selected=project?.scenes.filter(s=>!animationLocked(s)&&omniSelection().has(s.id))||[];
+  const selected=project?.scenes.filter(s=>(!animationLocked(s)||pendingCloudAnimation(s))&&omniSelection().has(s.id))||[];
   if(!project||view!=='studio'||!selected.length){box?.remove();return;}
   if(!box){
     box=el('aside',undefined,'animation-budget');box.id='animation-budget';box.dataset.testid='animation-budget';box.setAttribute('aria-label','Выбранные анимации');
@@ -213,14 +215,15 @@ function renderAnimationBudget(){
   box.querySelector('[data-testid=animation-budget-counts]').textContent=`Выбрано кадров: ${count}`;
   box.querySelector('[data-testid=animation-budget-model]').textContent=model;
   box.querySelector('[data-testid=animation-budget-total]').textContent=engine==='veo_lite'?`≈ ${(count*(project.animation_settings?.veo_lite_credit_cost||10)).toLocaleString('ru-RU')} кредитов`:'Стоимость — по тарифу Flow';
-  const waiting=selected.filter(s=>!sceneStillApproved(s)||!sceneDisplayGeneration(s)?.asset_id||s.stale).length;
+  const waiting=selected.filter(s=>!pendingCloudAnimation(s)&&(!sceneStillApproved(s)||!sceneDisplayGeneration(s)?.asset_id||s.stale)).length;
+  const resuming=selected.filter(pendingCloudAnimation).length;
   const bridgeBusy=Boolean(flowBridgeStatus?.running&&flowBridgeStatus?.project_id===current);
   const launch=box.querySelector('[data-testid=animation-budget-generate]');
   launch.disabled=animationRunBusy||bridgeBusy||waiting===count;
-  launch.textContent=animationRunBusy?'Отправляю…':bridgeBusy?'Flow занят…':`Запустить в ${model}`;
+  launch.textContent=animationRunBusy?'Отправляю…':bridgeBusy?'Flow занят…':resuming===count?'Продолжить очередь Flow':`Запустить в ${model}`;
   launch.title='Запустить только отмеченные кадры.';
   const hint=box.querySelector('[data-testid=animation-budget-hint]');
-  hint.textContent=bridgeBusy?'Дождитесь завершения текущей очереди Flow.':waiting?`Не готовы: ${waiting}`:'';hint.hidden=!hint.textContent;
+  hint.textContent=bridgeBusy?'Дождитесь завершения текущей очереди Flow.':resuming?`Уже в очереди: ${resuming}. Продолжение сохранит прежние задания.`:waiting?`Не готовы: ${waiting}`:'';hint.hidden=!hint.textContent;
 }
 async function saveAnimationSelection(){
   const pid=current,selection=[...omniSelection()],engine=selectedAnimationEngine();
@@ -242,24 +245,25 @@ async function runSelectedAnimations(onlySceneId=null){
     await animationParameterSave;
     const latest=await api(`/projects/${pid}`);if(current!==pid)return;
     project=latest;
-    const ready=latest.scenes.filter(s=>selection.has(s.id)&&!animationLocked(s)&&sceneStillApproved(s)&&sceneDisplayGeneration(s)?.asset_id&&!s.stale);
-    if(!ready.length)throw Error('Среди отмеченных кадров нет готовых к анимации. Проверьте изображения.');
+    const plan=animationLaunchPlan(latest.scenes,selection,s=>sceneStillApproved(s)&&sceneDisplayGeneration(s)?.asset_id&&!s.stale);
+    const ready=plan.fresh;
+    if(!ready.length&&!plan.resume.length)throw Error('Нет кадров для запуска: проверьте актуальность и утверждение изображений. Готовые видео повторно не запускаются.');
     // Persist only this launch's selected scenes; other frames and running jobs stay untouched.
     for(const scene of ready){
       if(current!==pid)return;
       await api(`/scenes/${scene.id}/animation/select`,{engine});
     }
     if(current!==pid)return;
-    watchAnimationRun(pid,ready);
-    const result=await api(`/projects/${pid}/animation/generate`,{scene_ids:ready.map(s=>s.id)});
-    const queued=[],failed=[];
+    watchAnimationRun(pid,[...ready,...plan.resume]);
+    const result=ready.length?await api(`/projects/${pid}/animation/generate`,{scene_ids:ready.map(s=>s.id)}):{scenes:[]};
+    const queued=[...plan.resume],failed=[];
     for(const scene of ready){
       const status=result.scenes?.find(s=>s.scene_id===scene.id);
       if(['queued_omni','generating_omni','queued_veo','generating_veo'].includes(status?.status))queued.push(scene);
       else{failed.push(scene);animationRunFailed(pid,scene,status?.error);}
     }
     let bridgeError='';
-    if(queued.length){try{await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:queued.map(s=>s.id)});}catch(error){bridgeError=error.message;}}
+    if(queued.length){try{await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:queued.map(s=>s.id),animations_only:true});}catch(error){bridgeError=error.message;}}
     if(current===pid){
       await refresh(true);
       showNotice(`${model}: ${queued.length} кадров ${bridgeError?'в очереди, ожидают подключения':'отправлено в Flow'}.`+(failed.length?` Ошибок: ${failed.length}.`:'')+(bridgeError?` ${bridgeError}`:''),failed.length>0||Boolean(bridgeError));
@@ -278,7 +282,12 @@ async function runSingleAnimation(sceneId,engine){
     project=latest;
     const scene=project.scenes.find(s=>s.id===sceneId);
     if(!scene)throw Error('Кадр больше не существует. Обновите проект.');
-    if(animationLocked(scene))throw Error('Для этого кадра уже есть видео или запущенная задача.');
+    if(pendingCloudAnimation(scene)){
+      watchAnimationRun(pid,[scene]);
+      await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:[sceneId],animations_only:true});
+      await refresh(true);showNotice(`Кадр ${scene.position}: продолжаю прежнее задание Flow без создания нового.`);return;
+    }
+    if(animationLocked(scene))throw Error('Для этого кадра уже есть готовое видео.');
     if(!sceneStillApproved(scene))throw Error('Сначала утвердите текущий вариант изображения кнопкой «Утвердить» под ним.');
     if(!sceneDisplayGeneration(scene)?.asset_id||scene.stale)throw Error('Сначала сохраните актуальное изображение этого кадра.');
     const data={engine};
@@ -298,7 +307,7 @@ async function runSingleAnimation(sceneId,engine){
     if(status?.status==='failed'||status?.status==='waiting_source_image')throw Error(status.error||'Кадр пока не готов к анимации.');
     if(engine!=='ken_burns'){
       if(!['queued_omni','generating_omni','queued_veo','generating_veo'].includes(status?.status))throw Error('Flow не подтвердил постановку кадра в очередь.');
-      await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:[sceneId]});
+      await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:[sceneId],animations_only:true});
     }else if(status?.status!=='completed')throw Error('2.5D не завершено. Откройте подробности на карточке.');
     if(current===pid){await refresh(true);showNotice(`Кадр ${scene.position}: ${name}${engine==='ken_burns'?' готово — смотрите видео на карточке.':' отправлен в Flow. Остальные кадры не запускались.'}`);}
   }catch(error){const scene=project?.scenes.find(s=>s.id===sceneId);if(scene)animationRunFailed(pid,scene,error.message);if(current===pid)await refresh(true);throw error;}
@@ -309,7 +318,7 @@ async function resumeSceneAnimation(scene){
   const jobs=await api(`/projects/${pid}/animation/jobs`);
   if(current!==pid)return;
   if(!jobs.jobs?.some(job=>job.scene_id===scene.id))throw Error('Кадр пока не готов к отправке в Flow. Проверьте изображение и описание сцены.');
-  await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:[scene.id]});
+  await api('/bridge/v1/command',{action:'start',project_id:pid,scene_ids:[scene.id],animations_only:true});
   watchAnimationRun(pid,[scene]);
   showNotice(`Кадр ${scene.position}: продолжение анимации отправлено в Flow.`);
   await refresh(true);
@@ -332,7 +341,7 @@ async function runUnselectedLocalAnimations(){
     async function worker(){
       while(current===pid&&!localAnimationStop&&next<scenes.length){
         const scene=scenes[next++];
-        showNotice(`Создаю 2.5D: готово ${completed} из ${planned} · ускоренная обработка…`);
+        showNotice(`Создаю 2.5D: готово ${completed} из ${planned} · 2 параллельных ролика…`);
         try{
           // Already-planned local scenes need no full-project engine selection request.
           if(scene.data.animation?.selected_engine!=='ken_burns'){
@@ -347,7 +356,7 @@ async function runUnselectedLocalAnimations(){
         }catch(error){failed++;animationRunFailed(pid,scene,error.message);}
       }
     }
-    await worker();
+    await Promise.all([worker(),worker()]);
     if(current===pid){
       await refresh(true);
       showNotice(`${localAnimationStop?'2.5D остановлено. ':''}Готово новых роликов 2.5D: ${completed} из ${planned}.`+(failed?` Ошибок: ${failed}.`:''),failed>0);
@@ -378,7 +387,8 @@ function renderAnimationSelectionBar(){
   const activeRun=animationRunFor(current);
   if(activeRun&&!activeRun.finished){const progress=animationRunProgress(activeRun,project.scenes),status=el('small',`Анимация: готово ${progress.completed.length} из ${progress.total}. По завершении появится уведомление «Анимации готовы».`,'animation-progress');status.dataset.testid='animation-progress';bar.append(status);}
   const selectable=project.scenes.filter(s=>!animationLocked(s)),count=selectable.filter(s=>omniSelection().has(s.id)).length;
-  summary.textContent=`${model}: ${count} · 2.5D: ${selectable.length-count} · готовые / запущенные: ${project.scenes.length-selectable.length}`;
+  const queued=project.scenes.filter(s=>pendingCloudAnimation(s)&&omniSelection().has(s.id)).length;
+  summary.textContent=`${model}: ${count+queued} · 2.5D: ${selectable.length-count} · готовые / запущенные: ${project.scenes.length-selectable.length}`+(queued?` · продолжить: ${queued}`:'');
   const actions=el('div',undefined,'animation-selection-actions');
   actions.append(button('Снять все галочки',()=>{for(const s of selectable)omniSelection().delete(s.id);storeOmniSelection();render();},'secondary','animation-select-none'),button(`Все в ${model}`,()=>{for(const s of selectable)omniSelection().add(s.id);storeOmniSelection();render();},'secondary','animation-select-all'),button('Сохранить выбор',saveAnimationSelection,'secondary','btn-animation-plan'),button('Запустить выбранные',()=>runSelectedAnimations(),'primary','btn-animation-generate'));
   const localReady=unselectedLocalAnimationScenes(project.scenes,omniSelection());
@@ -600,7 +610,7 @@ async function refreshChannels(includeArchived=false){try{channelsList=await api
 async function listProjects(){const list=await api('/projects');projectSelect.replaceChildren();const empty=el('option','Открыть проект');empty.value='';projectSelect.append(empty);for(const item of list){const option=el('option',item.title);option.value=item.id;option.selected=item.id===current;projectSelect.append(option);}}
 function resetDraft(){current=null;project=null;view='studio';selectedSubject=null;selectedLocation=null;selectedProp=null;selectedChannelId='';draftStory='';draftTarget=12;draftTargetAuto=true;selectedPreset=getInitialPreset();selectedMode=getInitialMode();selectedCameraMode=getInitialCameraMode();selectedCameraCustom=getInitialCameraCustom();selectedCameraPacing='steady';selectedAspectRatio='16:9';projectSelect.value='';render();}
 
-function render(){rememberAnimationDisclosures();updateAnimationCompletion();renderAnimationBudget();document.querySelectorAll('.step').forEach(item=>item.classList.toggle('active',item.dataset.view===view));if(view==='export'&&project&&montageProjectId===project.id){montageView?.updateProject(project);return;}montageRenderId++;montageView?.dispose();montageView=null;montageProjectId=null;renderControls();stopScenePreviews();main.replaceChildren();if(!project){renderWelcome();return;}if(view==='queue'||view==='export')renderOperationProgress();if(view==='queue')renderQueue();else if(view==='export')renderExport();else renderStudio();}
+function render(){rememberAnimationDisclosures();updateAnimationCompletion();renderAnimationBudget();document.querySelectorAll('.step').forEach(item=>item.classList.toggle('active',item.dataset.view===view));if(view==='export'&&project&&montageProjectId===project.id){montageView?.updateProject(project);return;}montageRenderId++;montageView?.dispose();montageView=null;montageProjectId=null;renderControls();stopScenePreviews();main.replaceChildren();if(!project){renderWelcome();return;}if(view==='queue')renderOperationProgress();if(view==='queue')renderQueue();else if(view==='export')renderExport();else renderStudio();}
 
 function renderControls(){controls.replaceChildren();const locked=Boolean(project);const textBackendLabel='DeepSeek Flash';
  const backendBox=el('section',undefined,'control-section');backendBox.append(sectionLabel('Движок генерации'));
@@ -1789,6 +1799,7 @@ function selectOptions(options,value,testid,ariaLabel){
 function animationBadge(scene,anim){
   const kb=Object.fromEntries(KB_MOTION_OPTIONS), veo=Object.fromEntries(VEO_MOTION_OPTIONS);
   const completed=Boolean(scene.video_asset_id||anim.status==='completed');
+  if(!completed&&['generating_omni','generating_veo'].includes(anim.status)&&anim.error)return ['Требуется проверка результата Flow','badge-veo'];
   if(completed){
     if(anim.source==='ken_burns'||anim.selected_engine==='ken_burns')return ['🎬 Видео: 2.5D · '+(kb[anim.ken_burns_preset]||'Ken Burns'),'badge-kb'];
     if(anim.selected_engine==='omni_flash')return [`⚡ Видео: Omni · ${(anim.omni||{}).resolution||'720p'} · ${scene.video_metadata?.duration_seconds||anim.actual_duration_seconds||'—'} сек.`,'badge-omni'];
@@ -1837,6 +1848,30 @@ function renderCompactAnimationControl(scene,display,anim){
     remove.onclick=async e=>{e.stopPropagation();try{await api(`/scenes/${scene.id}/animation/delete`,{});showNotice(`Видео кадра ${scene.position} удалено.`);await refresh(true);}catch(error){showNotice(`Ошибка удаления: ${error.message||error}`,true);}}; row.append(remove);
   }
   box.append(row);
+  if(!scene.video_asset_id&&['generating_omni','generating_veo'].includes(anim.status)&&anim.error){
+    const recovery=el('div',undefined,'animation-single-actions');
+    recovery.append(button('Загрузить найденное видео',()=>triggerFlowMp4Upload(scene),'secondary',`animation-recover-upload-${scene.position}`));
+    recovery.append(button('Результата нет — разрешить повтор',async()=>{
+      if(!confirm(`Проверьте библиотеку Google Flow для кадра ${scene.position}. Готового видео действительно нет? Будет разрешена новая попытка; она может расходовать лимит Flow.`))return;
+      try{
+        await api(`/scenes/${scene.id}/animation/resolve`,{confirmed_no_result:true,
+          expected_scene_revision:scene.current_revision,idempotency_key:anim.idempotency_key});
+        omniSelection().add(scene.id);storeOmniSelection();
+        showNotice(`Кадр ${scene.position}: повтор разрешён. Нажмите запуск анимации выбранных кадров.`);
+        await refresh(true);
+      }catch(error){showNotice(error.message,true);}
+    },'secondary',`animation-resolve-${scene.position}`));
+    recovery.append(button('Flow сообщил отказ',async()=>{
+      const reason=prompt('Вставьте точный текст отказа из Google Flow. Это завершит попытку без повторной генерации.');
+      if(!reason?.trim())return;
+      try{
+        await api(`/scenes/${scene.id}/animation/resolve`,{confirmed_provider_rejection:true,
+          provider_message:reason.trim(),expected_scene_revision:scene.current_revision,idempotency_key:anim.idempotency_key});
+        showNotice('Отказ Flow сохранён. Повтор не запущен.');await refresh(true);
+      }catch(error){showNotice(error.message,true);}
+    },'secondary',`animation-confirm-refusal-${scene.position}`));
+    box.append(recovery);
+  }
   const actual=scene.video_metadata?.duration_seconds||anim.actual_duration_seconds;
   const requested=(anim[anim.selected_engine==='omni_flash'?'omni':'veo']||{}).duration_seconds||anim.duration_seconds;
   if(['omni_flash','veo_lite'].includes(anim.selected_engine)&&scene.video_asset_id&&actual&&requested&&Math.abs(actual-requested)>0.15){

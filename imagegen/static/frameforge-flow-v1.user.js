@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name FrameForge Flow Bridge (new)
 // @namespace frameforge.local.bridge
-// @version 0.1.83
+// @version 0.1.89
 // @match https://flow.google.com/project/*
 // @match https://flow.google.com/u/*/project/*
 // @grant GM_xmlhttpRequest
@@ -253,19 +253,25 @@
    names:loaded.map(l=>l.label)
   };
  }
- function loadSourceImageDataUrl(relativeUrl) {
+ function loadSourceImageDataUrl(relativeUrl, expectedSha256=null) {
    if(!relativeUrl) return Promise.resolve(null);
    const targetUrl=relativeUrl.startsWith('http://')||relativeUrl.startsWith('https://')?relativeUrl:'http://127.0.0.1:8765'+relativeUrl;
    console.log('[FF Bridge] Fetching source image asset:', targetUrl);
    return new Promise((resolve,reject)=>GM_xmlhttpRequest({
     method:'GET',url:targetUrl,responseType:'arraybuffer',timeout:30000,
-    onload:r=>{try{
+    onload:async r=>{try{
      if(r.status<200||r.status>=300)throw Error(`Не удалось прочитать исходный кадр (HTTP ${r.status})`);
      const mime=(r.responseHeaders?.match(/content-type:\s*([^;\r\n]+)/i)||[])[1]||'image/png';
      if(!/^image\/(png|jpeg|webp)$/i.test(mime)) throw Error(`Неподдерживаемый формат референса: ${mime}`);
      const bytes=new Uint8Array(r.response||[]);
      if(bytes.length===0) throw Error('Пустой файл референса (0 байт)');
      if(bytes.length>10*1024*1024) throw Error(`Файл референса слишком большой (${bytes.length} байт, макс 10 МБ)`);
+     if(expectedSha256){
+      if(!crypto.subtle?.digest)throw Error('Невозможно проверить целостность исходного кадра. Видео не отправлено.');
+      const digest=await crypto.subtle.digest('SHA-256',bytes);
+      const actual=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('');
+      if(actual!==expectedSha256.toLowerCase())throw Error('Исходный кадр изменился при загрузке: SHA-256 не совпадает. Видео не отправлено.');
+     }
      let binary='';
      for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
      resolve(`data:${mime};base64,${(typeof btoa!=='undefined'?btoa(binary):(typeof Buffer!=='undefined'?Buffer.from(binary,'binary').toString('base64'):''))}`);
@@ -406,7 +412,11 @@
    return;
   }
   const request=pending.get(m.requestId);
-  if(!request||e.source!==peer||e.origin!==peerOrigin)return;
+  if(e.source!==peer||e.origin!==peerOrigin)return;
+  if(!request){
+   if(captureLateVideoResult(state,m)){save();tell('Поздний ответ на видеозапрос сохранён. Нажмите продолжение для проверки и загрузки в ФФ.');}
+   return;
+  }
   console.log('[FF Bridge] Received reply from custom tool:', m.type, m);
   if(m.type==='pong'){adapterImageConcurrency=Number.isInteger(m.imageConcurrency)?Math.max(1,Math.min(4,m.imageConcurrency)):adapterImageConcurrency;clearTimeout(request.timer);const p=request;pending.delete(m.requestId);p.resolve({pong:true});}
   if(m.type==='source_image_imported'){
@@ -448,7 +458,7 @@
   }
   if(m.type==='scene_video_result'){
    clearTimeout(request.timer);const p=request;pending.delete(m.requestId);
-   p.resolve({
+   const result=m.result||{
     mediaId:m.flow_media_id||m.mediaId,
     base64:m.base64,
     mimeType:m.mimeType||'video/mp4',
@@ -456,7 +466,9 @@
     source_image_sha256:m.source_image_sha256,
     scene_revision:m.scene_revision,
     idempotency_key:m.idempotency_key
-   });
+   };
+   if(p.timedOut&&p.owner?.job?.requestId===m.requestId){p.owner.result=result;save();tell('Поздний результат видео сохранён. Нажмите продолжение для загрузки в ФФ.');}
+   p.resolve(result);
   }
   if(m.type==='error'||m.type==='scene_video_error'){
    clearTimeout(request.timer);const p=request;pending.delete(m.requestId);
@@ -472,7 +484,8 @@
    const details=[safeError(m.name),errorText,m.code?`код ${m.code}`:'',m.cause?`причина: ${safeError(m.cause)}`:''].filter(Boolean).join('; ');
    const error=Error(details||'Неизвестная ошибка Flow');
    const structured=m.error&&typeof m.error==='object'?m.error:{};
-   error.flow={name:safeError(m.name||structured.name),message:errorText,code:m.code||structured.code||null,cause:safeError(m.cause||structured.cause),remoteReply:true};
+   error.flow=p.jobKind==='scene_video'?normalizeVideoFlowError(m.error,m):{name:safeError(m.name||structured.name),message:errorText,code:m.code||structured.code||null,cause:safeError(m.cause||structured.cause),remoteReply:true};
+   if(p.jobKind==='scene_video')error.message=error.flow.message;
    if(confirmedRemoteFailure(error) && p.owner?.job?.requestId===m.requestId) {
      p.owner.job.remoteFailure={requestId:m.requestId,code:error.flow.code,message:error.message};
      p.owner.job.submissionPhase='rejected';save();
@@ -518,11 +531,12 @@
    pending.set(job.requestId,{id:job.requestId,resolve,reject,timer,owner,timedOut:false,type,jobKind:job.kind});
    if(type==='generate')tell(`ФФ: запросов Flow в работе ${pending.size} / ${adapterImageConcurrency}; кадр ${job.position||job.id||''}`);
    try {
+    if(['generate','scene_video'].includes(type)&&owner?.job?.requestId===job.requestId){owner.job.submissionPhase='dispatching';save();}
     peer.postMessage({channel:CHANNEL,type,...job},peerOrigin);
-    if(type==='generate'&&owner?.job?.requestId===job.requestId){owner.job.submissionPhase='sent';save();}
+    if(['generate','scene_video'].includes(type)&&owner?.job?.requestId===job.requestId){owner.job.submissionPhase='sent';save();}
    } catch(error) {
     clearTimeout(timer);pending.delete(job.requestId);
-    if(type==='generate'&&owner?.job?.requestId===job.requestId){owner.job.submissionPhase='not_sent';save();}
+    if(['generate','scene_video'].includes(type)&&owner?.job?.requestId===job.requestId){owner.job.submissionPhase='not_sent';save();}
     reject(error);
    }
   });
@@ -1096,7 +1110,131 @@
    return true;
  }
 
- function scopeSavedWork(state,batchStage){
+ function requestState(root,task){
+   return new Proxy(root,{
+     get(target,key){return ['job','result','error'].includes(key)?task[key]:target[key];},
+     set(target,key,value){if(['job','result','error'].includes(key))task[key]=value;else target[key]=value;return true;}
+   });
+ }
+ function moveRequestOwner(root,task){
+   const local=requestState(root,task);
+   for(const request of pending.values())if(request.owner===root&&request.id===task.job?.requestId)request.owner=local;
+   return local;
+ }
+ function normalizeVideoFlowError(value,envelope={}){
+   const obj=value&&typeof value==='object'?value:{};
+   const message=String(obj.message||envelope.message||(typeof value==='string'?value:'Ошибка SDK Flow'));
+   const adapterCode=envelope.code||obj.code||null;
+   // The legacy hosted adapter invented FLOW_UNKNOWN_ERROR and INTERNAL.
+   // These strings are not native evidence of an outage or content policy.
+   const legacyFallback=adapterCode==='FLOW_UNKNOWN_ERROR';
+   let code=legacyFallback?'FLOW_SDK_UNCLASSIFIED':adapterCode;
+   const explicitPublicFigure=/правил[а-я]*[^.]*генераци[а-я]*[^.]*известных людей|policy[^.]*public figures|generation of (?:prominent|famous) people/i.test(message);
+   if(explicitPublicFigure)code='FLOW_POLICY_PUBLIC_FIGURE';
+   return {name:String(obj.name||envelope.name||'Error'),message,code:code||'FLOW_SDK_UNCLASSIFIED',
+     adapterCode,cause:legacyFallback&&obj.cause==='INTERNAL'?'':String(obj.cause||envelope.cause||''),
+     codeOrigin:explicitPublicFigure?'provider_message':legacyFallback?'adapter_fallback':obj.codeOrigin||'unreported',
+     phase:obj.phase||null,elapsedMs:Number.isFinite(obj.elapsedMs)?obj.elapsedMs:null,remoteReply:true};
+ }
+ function confirmedVideoFailure(error){
+   const text=String(error?.message||error?.flow?.message||error||'');
+   if(/timeout|timed out|таймаут|не ответил|no transferable|decode|network|transport/i.test(text))return false;
+   return /\b(ERR_GEN_FAILED|FLOW_CAPABILITY_UNSUPPORTED|ERR_UNSUPPORTED_MODEL|FLOW_POLICY_PUBLIC_FIGURE)\b/.test(text+' '+String(error?.flow?.code||''));
+ }
+ function videoFailureReason(job,error){
+   const flow=error?.flow||{};
+   const code=flow.code||'NO_PROVIDER_CODE';
+   const message=String(flow.message||error?.message||error||'Неизвестная ошибка');
+   // Generic SDK exceptions do not establish a moderation decision or a
+   // service outage. Keep the uncertainty tied to this exact request.
+   const detail=['FLOW_UNKNOWN_ERROR','FLOW_SDK_UNCLASSIFIED','NO_PROVIDER_CODE'].includes(code)?'SDK не передал точную причину. Это не подтверждает недоступность сервиса или отказ по правилам.':`Код: ${code}.`;
+   return `Кадр ${job.position}: ${message}. ${detail} Исход видеозапроса не подтверждён; автоматический повтор не запускается.`;
+ }
+ function captureLateVideoResult(root,message){
+   if(!root||!['result','scene_video_result','error','scene_video_error'].includes(message.type))return false;
+   const tasks=[root,...Object.values(root.videoTasks||{}),root.deferredSceneWork].filter(Boolean);
+   const task=tasks.find(t=>t.job?.kind==='scene_video'&&t.job.requestId===message.requestId);
+   if(!task)return false;
+   if(['error','scene_video_error'].includes(message.type)){
+     const error={flow:{code:message.code||message.error?.code,message:message.error?.message||message.error||message.message,remoteReply:true}};
+     task.lastResponse={requestId:message.requestId,code:error.flow.code||null,
+       message:String(error.flow.message||''),at:new Date().toISOString()};
+     if(!confirmedVideoFailure(error)){task.error=videoFailureReason(task.job,error);return true;}
+     task.job.remoteFailure={requestId:message.requestId,code:error.flow.code,message:String(error.flow.message)};
+     task.error=String(error.flow.message);return true;
+   }
+   const result=message.result||message;
+   if(!result.base64||!/^video\/(mp4|webm)$/.test(result.mimeType)||result.error)return false;
+   if(!task.result)task.result=result;
+   return true;
+ }
+ async function recoverVideoTasks({state,sceneIds,save,api,uploadSavedFn,previousError}){
+   state.videoTasks=state.videoTasks||{};
+   const recovery=await api('GET',`/api/projects/${state.projectId}/animation/recovery`);
+   const currentScenes=new Map((recovery.scenes||[]).map(scene=>[scene.scene_id,scene]));
+   if(state.job?.kind==='scene_video'){
+     const key=state.job.requestId;
+     if(!key)throw Error('У сохранённого видео нет requestId. Проверьте результат в Flow.');
+     if(state.videoTasks[key]?.job&&state.videoTasks[key].job!==state.job)throw Error('Найдено несколько записей одного видеозапроса. Результаты сохранены.');
+     const task={job:state.job,result:state.result,error:previousError||state.error};
+     state.videoTasks[key]=task;moveRequestOwner(state,task);
+     state.job=null;state.result=null;state.error=null;save();
+   }
+   const unresolved=[];
+   for(const task of Object.values(state.videoTasks)){
+     const job=task.job;if(!job)continue;
+     const sid=job.scene_id||job.id;
+     if(sceneIds&&!sceneIds.includes(sid))continue;
+     const current=currentScenes.get(sid);
+     if(current?.position&&!job.position){job.position=current.position;save();}
+     if(current?.video_asset_id||(current?.resolved_attempt_keys||[]).includes(job.idempotency_key)){
+       task.resolvedAttempt={...job,reason:current.video_asset_id?'video_available':'confirmed_no_result'};
+       if(task.result)task.resolvedResult=task.result;
+       task.job=null;task.result=null;task.error=null;save();continue;
+     }
+     if(task.result){await uploadSavedFn(requestState(state,task));task.error=null;save();continue;}
+     if(['prepared','not_sent'].includes(job.submissionPhase)){
+       await api('POST',`/api/scenes/${sid}/animation/progress`,{
+         status:job.model==='gemini-omni-1.1-flash'?'queued_omni':'queued_veo',
+         expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+         source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256});
+       task.unsentAttempt={...job};task.job=null;task.error=null;save();continue;
+     }
+     const rejected=job.remoteFailure?.requestId===job.requestId?job.remoteFailure.message:null;
+     if(rejected||confirmedVideoFailure(task.error)){
+       await api('POST',`/api/scenes/${sid}/animation/progress`,{status:'failed',error:rejected||task.error,
+         expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+         source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256});
+       task.failedAttempt={...job,error:rejected||task.error};task.job=null;save();continue;
+     }
+     // Unknown is not a rejection. Preserve this request and exclude its scene
+     // from submission while other selected videos may proceed.
+     if(task.uncertaintyReportedFor!==job.requestId){
+       const evidence=job.lastResponse||task.lastResponse;
+       const reason=videoFailureReason(job,evidence?{flow:evidence}:task.error||'Ответ Flow отсутствует');
+       await api('POST',`/api/scenes/${sid}/animation/progress`,{
+         status:job.model==='gemini-omni-1.1-flash'?'generating_omni':'generating_veo',error:reason,
+         expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+         source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256});
+       task.uncertaintyReportedFor=job.requestId;save();
+     }
+     unresolved.push({scene_id:sid,position:job.position,requestId:job.requestId,idempotency_key:job.idempotency_key});
+   }
+   return unresolved;
+ }
+ function scopeSavedWork(state,batchStage,animationsOnly=false){
+   if(animationsOnly){
+     if(!state.job&&state.deferredSceneWork?.job?.kind==='scene_video'){
+       Object.assign(state,state.deferredSceneWork);delete state.deferredSceneWork;
+     }
+     if(state.job&&state.job.kind!=='scene_video'){
+       if(state.deferredImageWork?.job)throw Error('Есть две незавершённые задачи изображений. Обе сохранены; проверьте очередь Flow.');
+       state.deferredImageWork={job:state.job,result:state.result,error:state.error};moveRequestOwner(state,state.deferredImageWork);
+       state.job=null;state.result=null;state.error=null;
+     }
+     return;
+   }
+   if(!state.job&&state.deferredImageWork){Object.assign(state,state.deferredImageWork);delete state.deferredImageWork;}
    if(batchStage==='portraits' && state.job && state.job.kind!=='characters'){
      if(state.deferredSceneWork)throw Error('В мосте сохранено несколько незавершённых задач. Проверьте очередь Flow.');
      state.deferredSceneWork={job:state.job,result:state.result,error:state.error};
@@ -1107,7 +1245,7 @@
    }
  }
 
- async function run(sceneIds=null,generationIds=null,imagesOnly=false,batchStage=null,expectedProjectId=null) {
+ async function run(sceneIds=null,generationIds=null,imagesOnly=false,batchStage=null,expectedProjectId=null,animationsOnly=false) {
   if(running)return;
   if(!peer){tell('Откройте инструмент с адаптером v1');return;}
   running=true;pauseRequested=false;
@@ -1142,12 +1280,13 @@
    state.sdkFailures=state.sdkFailures&&typeof state.sdkFailures==='object'?state.sdkFailures:{};
    state.sdkCircuits=state.sdkCircuits&&typeof state.sdkCircuits==='object'?state.sdkCircuits:{};
    state.flowImageModel=['🍌 Nano Banana 2 Lite','🍌 Nano Banana 2','🍌 Nano Banana Pro'].includes(flowSettings?.flow_image_model)?flowSettings.flow_image_model:'🍌 Nano Banana 2';
-   scopeSavedWork(state,batchStage);
+   scopeSavedWork(state,batchStage,animationsOnly);
    // A failure belongs to the previous attempt.  Never show it as the state of
    // a fresh user-started run after the bridge or Flow app has been reloaded.
    const previousError=state.error;
     state.error=null;
     isolateCompletedSceneForPortrait(state,generationIds,previousError);
+    const unresolvedVideos=(!batchStage&&!generationIds&&!imagesOnly)?await recoverVideoTasks({state,sceneIds,save,api,uploadSavedFn:uploadSaved,previousError}):[];
     if(state.job&&!state.result&&!state.job.retryPending&&!state.job.admissionPending){
      const staleStaticSync=state.job.kind!=='scene_video'&&state.refs[state.job.kind+':'+state.job.id];
      const retryable=Boolean(staleStaticSync);
@@ -1156,7 +1295,7 @@
      tell('Смываю старую ошибку...');
     }
    save();
-   if(batchStage!=='portraits')await recoverSceneTasks({state,sceneIds,generationIds,save,tell,api,uploadSavedFn:uploadSaved});
+   if(!animationsOnly&&batchStage!=='portraits')await recoverSceneTasks({state,sceneIds,generationIds,save,tell,api,uploadSavedFn:uploadSaved});
    // A cached rejected image from an earlier browser session must be discarded.
    // The ordinary scene loop below will generate a fresh candidate.
    if(sceneIds&&state.job?.kind==='scenes'&&!sceneIds.includes(state.job.id)){
@@ -1174,7 +1313,7 @@
      tell('Кадр отклонён проверкой. Запрашиваю новый вариант вместо остановки очереди...');
     } else throw error;
    }
-    await processBridgeQueue({
+    if(!animationsOnly)await processBridgeQueue({
       project_id,
       sceneIds,
       generationIds,
@@ -1196,7 +1335,7 @@
     });
    if(!pauseRequested&&!generationIds&&!imagesOnly&&!batchStage) {
     const animData=await api('GET',`/api/projects/${project_id}/animation/jobs`);
-    const veoJobs=(animData.jobs||[]).filter(job=>!sceneIds||sceneIds.includes(job.scene_id));
+    const veoJobs=(animData.jobs||[]).filter(job=>(!sceneIds||sceneIds.includes(job.scene_id))&&!unresolvedVideos.some(t=>t.scene_id===job.scene_id));
     console.log('[FF Bridge] Animation jobs from server:', veoJobs);
     if(animData.plan_mode==='economy'&&veoJobs.length>5){
      throw Error('Превышен лимит 5 Veo jobs в экономном режиме');
@@ -1211,16 +1350,34 @@
      const active=await api('GET','/api/projects/current');
      if(active.project_id!==project_id)throw Error('Активный проект изменился');
 
-     // 1. Check or perform isolated source PNG import into Flow
-     const importKey=`frameforge_source:${job.scene_id}:${job.source_image_sha256}`;
-     let sceneMediaId=(job.source_image_sha256 ? state.refs[importKey] : null) || job.firstFrameImageMediaId || (job.referenceImageMediaIds && job.referenceImageMediaIds[0]) || null;
+     if(job.requires_direction_refresh===true||(job.prompt_contract&&job.prompt_contract!=='image-motion/3')){
+      // Submitted/unknown scenes were excluded by recoverVideoTasks above.
+      // Also exclude a saved successful result waiting to be uploaded. Only
+      // an entirely unsent scene may receive a new prompt and request key.
+      const saved=[state,...Object.values(state.videoTasks||{}),state.deferredSceneWork].filter(Boolean);
+      if(saved.some(t=>t.job?.kind==='scene_video'&&(t.job.scene_id||t.job.id)===job.scene_id))
+       throw Error(`Кадр ${job.position}: есть сохранённая попытка Flow. Промпт не изменён; сначала сохраните её результат.`);
+      tell(`ФФ: готовлю описание движения кадра ${job.position}...`);
+      const updated=await api('POST',`/api/projects/${project_id}/animation/prepare-direction`,{
+       scene_id:job.scene_id,expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+       source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256,not_sent:true
+      });
+      if(updated.prompt_contract!=='image-motion/3'||!updated.prompt||!updated.idempotency_key||!Number.isInteger(updated.scene_revision))
+       throw Error('ФФ не подтвердил актуальность описания движения. Видеозапрос не отправлен.');
+      Object.assign(job,updated);
+     }
 
+     // Remote media IDs are handles, not durable source-image identities.
+     // A new unsent video attempt always imports its exact current image.
+     // Submitted/unknown attempts are recovered above with their original
+     // request + media ID; they never pass through this fresh-import path.
+     let sceneMediaId=null;
      if(!sceneMediaId){
       if(!job.source_image_asset_id||!job.source_image_sha256){
        throw Error(`Кадр ${job.position}: отсутствует исходное изображение для анимации.`);
       }
       tell(`ФФ: импорт исходного кадра ${job.position} в Flow...`);
-      const sourceImageData=await loadSourceImageDataUrl(job.source_image_url||`/api/assets/${job.source_image_asset_id}`);
+      const sourceImageData=await loadSourceImageDataUrl(job.source_image_url||`/api/assets/${job.source_image_asset_id}`,job.source_image_sha256);
       if(!sourceImageData){
        throw Error(`Кадр ${job.position}: не удалось прочитать исходный PNG.`);
       }
@@ -1242,8 +1399,12 @@
        throw Error(`Ошибка: в Flow импортирован неактуальный исходный кадр ${job.position}`);
       }
       sceneMediaId=importRes.mediaId;
-      state.refs[importKey]=sceneMediaId;
-      save();
+      state.diagnostics=Array.isArray(state.diagnostics)?state.diagnostics:[];
+      state.diagnostics.push({at:new Date().toISOString(),phase:'video_source_imported',
+       scene_id:job.scene_id,idempotency_key:job.idempotency_key,
+       source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256,
+       mediaId:sceneMediaId});
+      state.diagnostics=state.diagnostics.slice(-40);save();
       tell(`ФФ: исходный кадр ${job.position} импортирован и подтверждён.`);
      }
 
@@ -1254,6 +1415,8 @@
       type:'scene_video',
       scene_id:job.scene_id,
       id:job.scene_id,
+      position:job.position,
+      submissionPhase:'prepared',
       scene_revision:job.scene_revision,
       source_image_asset_id:job.source_image_asset_id,
       source_image_sha256:job.source_image_sha256,
@@ -1268,15 +1431,48 @@
      };
      save();
      const engineLabel=job.engine==='omni_flash'||job.model==='gemini-omni-1.1-flash'?'Omni 1.1 Flash':'Veo 3.1 Lite';
+     await api('POST',`/api/scenes/${job.scene_id}/animation/progress`,{
+      status:job.engine==='omni_flash'||job.model==='gemini-omni-1.1-flash'?'generating_omni':'generating_veo',
+      expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+      source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256
+     });
      tell(`ФФ: запуск ${engineLabel} I2V для кадра ${job.position} (ожидание ~1 мин)...`);
      console.log('[FF Bridge] Calling generate for scene_video I2V:', state.job);
      try {
       state.result=await generate(state.job,'scene_video');
      } catch(error) {
-      // Only a definite rejection may be skipped. Ambiguous responses and
-      // timeouts still stop for recovery, without another charged submission.
+      if(error?.flow?.code==='FLOW_BUSY'){
+       state.job.submissionPhase='not_sent';save();
+       await api('POST',`/api/scenes/${job.scene_id}/animation/progress`,{
+        status:job.engine==='omni_flash'||job.model==='gemini-omni-1.1-flash'?'queued_omni':'queued_veo',
+        expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+        source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256
+       });
+       throw Error('Flow занят предыдущим запросом. Новый видеозапрос не запущен; продолжите после его завершения.');
+      }
+      // A remote error is an adapter reply, not proof that no video exists.
+      // Park this request; a transport timeout still stops for recovery.
       const code=error?.flow?.code||error?.code||(/\bERR_GEN_FAILED\b/.test(error?.flow?.message||error?.message||'')?'ERR_GEN_FAILED':null);
-      if(pauseRequested||!['ERR_GEN_FAILED','FLOW_CAPABILITY_UNSUPPORTED'].includes(code))throw error;
+      if(pauseRequested)throw error;
+      if(!confirmedVideoFailure(error)){
+       const reason=videoFailureReason(job,error);
+       if(state.job)state.job.lastResponse={requestId:state.job.requestId,code:code||null,
+         message:String(error?.flow?.message||error?.message||error),remoteReply:error?.flow?.remoteReply===true,at:new Date().toISOString()};
+       save();
+       if(error?.flow?.remoteReply!==true){
+        await api('POST',`/api/scenes/${job.scene_id}/animation/progress`,{
+         status:job.engine==='omni_flash'||job.model==='gemini-omni-1.1-flash'?'generating_omni':'generating_veo',
+         error:reason,expected_scene_revision:job.scene_revision,idempotency_key:job.idempotency_key,
+         source_image_asset_id:job.source_image_asset_id,source_image_sha256:job.source_image_sha256
+        });
+        throw Error(reason);
+       }
+       const parked=await recoverVideoTasks({state,sceneIds:[job.scene_id],save,api,
+         uploadSavedFn:uploadSaved,previousError:reason});
+       unresolvedVideos.push(...parked);processedVeo++;
+       tell(`ФФ: исход запроса кадра ${job.position} не подтверждён. Попытка сохранена; продолжаю остальные выбранные видео.`);
+       continue;
+      }
       addDiagnostic(state.job,error,'video_sdk_error');
       const reason=`${engineLabel}: ${error?.flow?.message||error?.message||code} (${code})`;
       await api('POST',`/api/scenes/${job.scene_id}/animation/progress`,{
@@ -1304,7 +1500,8 @@
     }
    }
    if(!pauseRequested){
-    if(batchStage==='portraits')tell('Портреты готовы к проверке. Проверьте их в FrameForge и запустите сцены той же кнопкой.');
+    if(unresolvedVideos.length)tell(`Остальные выбранные видео обработаны. Неподтверждённых попыток: ${unresolvedVideos.length} (кадры ${unresolvedVideos.map(t=>t.position||t.scene_id).join(', ')}). Их повтор не запускался; проверьте результаты в Flow.`);
+    else if(batchStage==='portraits')tell('Портреты готовы к проверке. Проверьте их в FrameForge и запустите сцены той же кнопкой.');
     else tell(generationIds?'Эталон сохранён. Мост подключён и ждёт следующую команду.':'Очередь завершена. Мост подключён и ждёт следующую команду.');
    }else{
     tell('Пауза. Текущий кадр сохранён');
@@ -1329,13 +1526,13 @@
    const response=await api('POST','/api/bridge/v1/heartbeat',{
     project_id,flow_project_id:flowProject,
     adapter_connected:Boolean(peer),running,status:status.textContent,ack_command_id:ackCommandId,
-    adapter_instance_id:adapterInstanceId,script_version:'0.1.83',scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
+    adapter_instance_id:adapterInstanceId,script_version:'0.1.89',scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
    });
    const command=response.command;
    if(command&&command.id!==processedCommandId&&command.project_id===project_id
       && !(command.action==='start'&&running)){
     processedCommandId=command.id;ackCommandId=command.id;
-    if(command.action==='start')void run(Array.isArray(command.scene_ids)?command.scene_ids:null,Array.isArray(command.generation_ids)?command.generation_ids:null,command.images_only===true,command.batch_stage,command.project_id);
+    if(command.action==='start')void run(Array.isArray(command.scene_ids)?command.scene_ids:null,Array.isArray(command.generation_ids)?command.generation_ids:null,command.images_only===true,command.batch_stage,command.project_id,command.animations_only===true);
     if(command.action==='pause'&&running){pauseRequested=true;tell('Пауза запрошена из ФФ: сохраняю текущий кадр');}
     if(command.action==='check'){
      tell('Проверяю и привязываю мост к выбранному проекту ФФ...');
@@ -1367,7 +1564,7 @@
  });
  pause.addEventListener('click',()=>{if(running){pauseRequested=true;tell('Пауза запрошена: сохраняю текущий кадр');}});
  reset.addEventListener('click',async()=>{
-  if(running||pending.size||Object.values(state?.sceneTasks||{}).some(task=>task.job||task.result)){tell('Есть незавершённые запросы. Сохраните результаты перед сбросом.');return;}
+  if(running||pending.size||state?.job||state?.result||state?.deferredImageWork||state?.deferredSceneWork||Object.values(state?.videoTasks||{}).some(task=>task.job||task.result)||Object.values(state?.sceneTasks||{}).some(task=>task.job||task.result)){tell('Есть незавершённые запросы. Сохраните результаты перед сбросом.');return;}
   try{
    const {project_id}=await api('GET','/api/projects/current');
    const flowProject=getFlowProjectId();
@@ -1381,6 +1578,8 @@
 
   if (typeof globalThis !== 'undefined') {
     globalThis.FFBridgeQueue = {
+      normalizeVideoFlowError,confirmedVideoFailure,videoFailureReason,
+      scopeSavedWork,recoverVideoTasks,captureLateVideoResult,
       getFlowProjectId,
       sceneTaskState,
       recoverSceneTasks,
@@ -1399,6 +1598,8 @@
   }
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+      normalizeVideoFlowError,confirmedVideoFailure,videoFailureReason,
+      scopeSavedWork,recoverVideoTasks,captureLateVideoResult,
       getFlowProjectId,
       sceneTaskState,
       recoverSceneTasks,

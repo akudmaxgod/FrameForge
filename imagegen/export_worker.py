@@ -263,8 +263,6 @@ class ExportWorker:
         if data.get('expected_revision')!=edit['revision']:
             raise DomainError('Сначала сохраните текущую версию монтажа.',409)
         doc=self.service.editing.validate(project_id,edit['document'])
-        if doc.get('voice_fit',{}).get('stale'):
-            raise DomainError('Озвучка изменилась после подгонки. Рассчитайте новый вариант перед экспортом.',409)
         if not normalize(doc)['clips']:
             raise DomainError('Добавьте готовые клипы в монтаж.')
         video_end = normalize(doc)['duration_ms']

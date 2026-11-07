@@ -263,6 +263,8 @@ class MaterialSearchService:
 
         # Check segment duration staleness: compare current clips duration with requirement duration
         target_clips = [clips_map[cid] for cid in origin_clip_ids]
+        from ..insert_coverage import ensure_unanimated
+        ensure_unanimated(self.service, project_id, target_clips)
         current_dur_ms = 0.0
         for c in target_clips:
             dur = (c.get("trim_out_ms", 0) - c.get("trim_in_ms", 0)) / max(0.001, c.get("playback_rate", 1)) + c.get("hold_last_ms", 0)
@@ -326,6 +328,8 @@ class MaterialSearchService:
 
         # Re-verify montage revision after download and verification
         current_edit = self.service.editing.get(project_id)
+        if current_edit['revision'] != current_rev:
+            raise DomainError('Монтаж изменился во время импорта. Обновите предложения.', 409)
         if expected_revision is not None and current_edit["revision"] != expected_revision:
             raise DomainError(f"Монтаж был изменён во время импорта материала (ожидалась ревизия {expected_revision}, актуальная {current_edit['revision']}). Обновите предложения.", 409)
         current_rev = current_edit["revision"]
@@ -411,7 +415,8 @@ class MaterialSearchService:
         new_doc["clips"] = updated_clips
 
         # 4. Save atomically through official Editing pipeline
-        saved_edit = self.service.editing.save(project_id, {"expected_revision": current_rev, "document": new_doc})
+        saved_edit = self.service.editing.save(project_id, {"expected_revision": current_rev, "document": new_doc},
+                                               guard=lambda: ensure_unanimated(self.service, project_id, target_clips))
         saved_doc = saved_edit["document"]
         saved_rev = saved_edit["revision"]
 

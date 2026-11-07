@@ -122,7 +122,7 @@ class Application:
             owner=service.db.one('SELECT project_id FROM '+parts[1]+' WHERE id=?',(parts[2],))
             if owner:service.project(owner['project_id'])
         if method == 'GET' and path == '/api/editorial-capabilities':
-            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc2', 'bridge_version': '0.1.83'}
+            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc3', 'bridge_version': '0.1.89'}
         if method == 'GET' and path == '/api/session':
             return {'token': self.token}
         if method == 'GET' and path == '/api/settings':
@@ -254,6 +254,10 @@ class Application:
                 'staged_image_batch': bridge.get('staged_image_batch', False),
                 'image_concurrency': bridge.get('image_concurrency', 1),
                 'active_image_requests': bridge.get('active_image_requests', 0),
+                'animations_only': bridge.get('animations_only', False),
+                'video_recovery': bridge.get('video_recovery', False),
+                'animation_direction_refresh': bridge.get('animation_direction_refresh', False),
+                'animation_direction_contract': bridge.get('animation_direction_contract'),
             }
         if path == '/api/bridge/v1/heartbeat' and method == 'POST':
             project_id = (data or {}).get('project_id')
@@ -291,6 +295,10 @@ class Application:
                     bridge['character_casting']=data.get('character_casting') is True
                     bridge['quota_admission']=data.get('quota_admission') is True
                     bridge['images_only']=data.get('images_only') is True
+                    bridge['animations_only']=data.get('animations_only') is True
+                    bridge['video_recovery']=data.get('video_recovery') is True
+                    bridge['animation_direction_refresh']=data.get('animation_direction_refresh') is True
+                    bridge['animation_direction_contract']=data.get('animation_direction_contract') if data.get('animation_direction_contract') == 'image-motion/3' else None
                     bridge['staged_image_batch']=data.get('staged_image_batch') is True
                     concurrency=data.get('image_concurrency',1)
                     bridge['image_concurrency']=min(4,max(1,concurrency)) if type(concurrency) is int else 1
@@ -309,6 +317,10 @@ class Application:
             scene_ids = (data or {}).get('scene_ids')
             generation_ids = (data or {}).get('generation_ids')
             batch_stage = (data or {}).get('batch_stage')
+            animations_only = data.get('animations_only') is True
+            if animations_only and (action != 'start' or not scene_ids or generation_ids is not None
+                                    or batch_stage is not None or data.get('images_only')):
+                raise DomainError('Для запуска анимации выберите кадры без режима генерации изображений.', 400)
             if action not in ('start', 'pause', 'check') or not isinstance(project_id, str):
                 raise DomainError('Некорректная команда моста.', 400)
             forgotten = service._project_profile_type(project_id) == 'forgotten_cities'
@@ -368,7 +380,20 @@ class Application:
                     raise DomainError('Обновите userscript Flow Bridge: требуется изолированный кастинг эталонов.', 409)
                 if action=='start' and data.get('images_only') is True and not bridge.get('images_only'):
                     raise DomainError('Для подготовки только кадров нужен обновлённый мост Flow.',409)
-                if action=='start' and generation_ids is None and batch_stage != 'portraits' and service.settings().get('google_queue_enabled') is True and not bridge.get('quota_admission'):
+                if animations_only and not bridge.get('animations_only'):
+                    raise DomainError('Обновите userscript FrameForge Flow Bridge до 0.1.84 и перезагрузите вкладку Flow: требуется отдельная очередь анимации.', 409)
+                if (action == 'start' and generation_ids is None and batch_stage is None
+                        and not data.get('images_only') and bridge.get('animation_direction_contract') != 'image-motion/3'):
+                    pending = service.db.all('''SELECT s.id,r.data FROM scenes s JOIN scene_revisions r
+                        ON r.scene_id=s.id AND r.revision=s.current_revision WHERE s.project_id=?
+                        AND s.video_asset_id IS NULL''', (project_id,))
+                    if any((json.loads(row['data']).get('animation') or {}).get('status') in ('queued_omni','queued_veo')
+                           and (json.loads(row['data']).get('animation') or {}).get('prompt_contract') != 'image-motion/3'
+                           for row in pending if scene_ids is None or row['id'] in scene_ids):
+                        raise DomainError('Обновите FrameForge Flow Bridge до 0.1.86 и перезагрузите Flow: требуется безопасное обновление старых видео-промптов.', 409)
+                if animations_only and (bridge['running'] or bridge['command'] or bridge.get('active_image_requests')):
+                    raise DomainError('Flow занят. Дождитесь завершения текущего запроса.', 409)
+                if action=='start' and not animations_only and generation_ids is None and batch_stage != 'portraits' and service.settings().get('google_queue_enabled') is True and not bridge.get('quota_admission'):
                     raise DomainError('Для новой очереди нужен обновлённый мост Flow с ожиданием проверки кадров.',409)
                 if action != 'check' and bridge['project_id'] != project_id:
                     raise DomainError('Мост Flow не подключён к выбранному проекту. Нажмите «Проверить мост».', 409)
@@ -378,6 +403,8 @@ class Application:
                            'scene_ids': scene_ids, 'generation_ids': generation_ids, 'images_only':data.get('images_only') is True}
                 if batch_stage is not None:
                     command['batch_stage'] = batch_stage
+                if animations_only:
+                    command['animations_only'] = True
                 bridge['command'] = command
                 if action == 'start':
                     bridge['animation_scene_ids'] = scene_ids
@@ -684,7 +711,13 @@ class Application:
                             return service.media_analysis.cancel_job(project_id, job['id'])
                         return {'status': 'no_active_job'}
                     raise DomainError('Не найдено.', 404)
+                if len(parts) == 5 and parts[4] == 'media-photo-motion' and method == 'POST':
+                    from .insert_photo_motion import apply_to_auto_photos
+                    return apply_to_auto_photos(service, project_id, data or {})
                 if len(parts) >= 5 and parts[4] == 'media-match':
+                    if len(parts) == 6 and parts[5] == 'progress' and method == 'GET':
+                        service.project(project_id)
+                        return service.media_matching.progress(project_id)
                     if len(parts) == 5 and method == 'POST':
                         return service.media_matching.propose_inserts(project_id, data or {})
                     if len(parts) == 5 and method == 'GET':
@@ -693,8 +726,10 @@ class Application:
                             prop['proposals'] = json.loads(prop.get('proposals_json') or '[]')
                         return prop or {'status': 'none', 'proposals': []}
                     if len(parts) == 7 and method == 'POST':
+                        if parts[6] == 'preview':
+                            return service.montage_inserts.preview_proposals(project_id, parts[5], (data or {}).get('coverage'), (data or {}).get('accepted_proposal_ids'))
                         if parts[6] == 'apply':
-                            return service.montage_inserts.apply_proposals(project_id, parts[5], (data or {}).get('accepted_proposal_ids'))
+                            return service.montage_inserts.apply_proposals(project_id, parts[5], (data or {}).get('accepted_proposal_ids'), coverage=(data or {}).get('coverage'))
                         if parts[6] == 'rollback':
                             return service.montage_inserts.rollback_proposal(project_id, parts[5])
                     raise DomainError('Не найдено.', 404)
@@ -796,6 +831,12 @@ class Application:
                 return service.resolve_cast_diff(project_id, data or {})
             if len(parts) == 5 and parts[3] == 'animation':
                 action = parts[4]
+                if action == 'recovery' and method == 'GET':
+                    from .animation_recovery import manifest
+                    return manifest(service, project_id)
+                if action == 'prepare-direction' and method == 'POST':
+                    from .animation_direction import refresh_queued_direction
+                    return refresh_queued_direction(service, project_id, (data or {}).get('scene_id'), data or {})
                 if action == 'selection' and method == 'POST':
                     return service.apply_animation_selection(project_id,data or {})
                 if action == 'plan' and method == 'POST':
@@ -994,6 +1035,9 @@ class Application:
             if parts[4] == 'passport' and method == 'GET':
                 return service.animation_passport(parts[2])
             if method == 'POST':
+                if parts[4] == 'resolve':
+                    from .animation_recovery import resolve_no_result
+                    return resolve_no_result(service, parts[2], data or {})
                 if parts[4] == 'select':
                     return service.select_scene_animation_engine(
                         parts[2],

@@ -1066,6 +1066,17 @@ body.montage-resizing video {
 
 
 /* Stock Pixabay Search UI */
+.media-coverage-controls{padding:14px 20px;background:#141b29;border:1px solid #303b54;border-radius:9px;margin:12px 16px;color:#e4eaf6;}
+.media-folder-box .media-coverage-controls{margin:12px 0;}
+.media-coverage-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px;}
+.media-coverage-amount{display:inline-flex;gap:5px;align-items:center;}
+.media-coverage-amount[hidden]{display:none;}
+.media-coverage-controls select,.media-coverage-controls input,.media-coverage-controls button{background:#0e1421;color:#eef2fa;border:1px solid #3a4865;border-radius:6px;padding:7px 9px;font:inherit;}
+.media-coverage-controls input{width:76px;}
+.media-coverage-controls button{cursor:pointer;}
+.media-coverage-controls button[aria-pressed=true]{background:#633bc2;border-color:#9b75ef;}
+.media-coverage-help{font-size:12px;line-height:1.5;color:#a9b9d2;margin:9px 0 0;}
+.media-coverage-summary{margin:0 20px 12px;color:#c2d5f5;line-height:1.5;font-size:13px;}
 .stock-search-modal {
   max-width: 1200px;
   width: 95vw;

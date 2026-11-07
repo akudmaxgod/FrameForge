@@ -74,10 +74,17 @@ def source_window(service,candidate,duration_ms,inspect=True):
     result['keyframe_paths_json']=dump(frames)
     return result
 
-def apply_full_segments(service,pid,proposal_id,proposals,current):
+def apply_full_segments(service,pid,proposal_id,proposals,current,coverage=None):
     before=copy.deepcopy(current['document']);doc=copy.deepcopy(before)
     if before.get('voice_fit',{}).get('stale'):raise DomainError('Подгонка к озвучке устарела. Обновите её перед вставкой.',409)
     originals={c['edit_clip_id']:c for c in before['clips']};order=list(originals);replacements={};consumed=set();records=[];edges={}
+    from .insert_coverage import ensure_unanimated, assert_budget
+    from .insert_coverage import policy as coverage_policy
+    from .insert_photo_motion import animate_photo
+    photo_motion = coverage_policy(coverage)['photo_motion']
+    target_ids = {cid for p in proposals for cid in (p.get('replace_clip_ids') or [p['edit_clip_id']])}
+    target_clips = [c for c in before['clips'] if c['edit_clip_id'] in target_ids]
+    ensure_unanimated(service, pid, target_clips, coverage)
     for p in proposals:
         ids=p.get('replace_clip_ids') or [p['edit_clip_id']]
         if any(i not in originals or i in consumed for i in ids):raise DomainError('Сегменты монтажа изменились. Пересчитайте подбор.',409)
@@ -110,6 +117,8 @@ def apply_full_segments(service,pid,proposal_id,proposals,current):
                          'source_video_asset_id':None if image else aid,'source_scene_revision':0,'trim_in_ms':start,'trim_out_ms':start+duration,
                          'playback_rate':1,'hold_last_ms':0,'muted':True,'illustrative':True,'framing':p.get('framing','fit')}
         replacement['placement_policy']=POLICY
+        replacement['placement_mode']='automatic'
+        animate_photo(service, pid, replacement, photo_motion, len(records))
         replacement['narration_origin_clip_id']=p.get('narration_origin_clip_id',old[0].get('narration_origin_clip_id',ids[0]))
         if replacement.get('source_kind')=='footage':
             from .montage_layers import generated_base
@@ -129,7 +138,11 @@ def apply_full_segments(service,pid,proposal_id,proposals,current):
     if doc.get('voice_fit'):
         from .montage_voice_fit import source_signature
         doc['voice_fit']['source_hash']=source_signature(doc)
-    saved=service.editing.save(pid,{'document':doc,'expected_revision':current['revision']})
+    assert_budget(before, doc, coverage)
+    saved=service.editing.save(pid,{'document':doc,'expected_revision':current['revision']},
+                              guard=lambda: ensure_unanimated(service, pid, target_clips, coverage))
+    applied_clips={c['edit_clip_id']:c for c in saved['document']['clips']}
+    for record in records:record['applied_clip']=applied_clips[record['insert_clip_id']]
     metadata={'placement_policy':POLICY,'backup_doc':before,'applied_revision':saved['revision'],'group_records':records}
     with service.db.transaction() as c:c.execute("UPDATE media_match_proposals SET status='applied',target_document_json=?,updated_at=? WHERE id=?",(dump(metadata),now(),proposal_id))
     return {'status':'applied','applied_count':len(records),'new_revision':saved['revision'],'document':saved['document']}
@@ -138,6 +151,9 @@ def rollback_full_segments(service,pid,proposal_id,metadata):
     current=service.editing.get(pid)
     if current['revision']==metadata['applied_revision']:doc=metadata['backup_doc']
     else:
+        current_clips={c['edit_clip_id']:c for c in current['document']['clips']}
+        if any(r.get('applied_clip')!=current_clips.get(r['insert_clip_id']) for r in metadata['group_records']):
+            raise DomainError('Вставки изменены вручную после расстановки. Откат сохранит правки: используйте историю монтажа.',409)
         doc=copy.deepcopy(current['document']);records={r['insert_clip_id']:r['orig_clips'] for r in metadata['group_records']};clips=[]
         for c in doc['clips']:clips.extend(copy.deepcopy(records.get(c['edit_clip_id'],[c])))
         doc['clips']=clips

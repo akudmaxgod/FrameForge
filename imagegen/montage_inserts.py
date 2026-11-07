@@ -19,7 +19,23 @@ class MontageInserts:
         self.service = service
         self.db = service.db
 
-    def apply_proposals(self, project_id: str, proposal_id: str, accepted_proposal_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    def preview_proposals(self, project_id, proposal_id, coverage=None, accepted_proposal_ids=None):
+        self.service.project(project_id)
+        row = self.db.one('SELECT * FROM media_match_proposals WHERE id=? AND project_id=?', (proposal_id, project_id))
+        if not row:
+            raise DomainError('Предложения вставок не найдены.', 404)
+        current = self.service.editing.get(project_id)
+        if row['status'] in ('applied', 'stale') or row['base_edit_revision'] != current['revision']:
+            raise DomainError('Предложения уже применены или монтаж изменился. Рассчитайте подбор заново.', 409)
+        voice = self.service.media_matching.compute_voice_hash(project_id)
+        if row.get('voice_binding_hash') and voice and row['voice_binding_hash'] != voice:
+            raise DomainError('Озвучка изменилась. Рассчитайте подбор заново.', 409)
+        from .insert_coverage import select, animated_scene_ids, policy
+        return {**select(current['document'], json.loads(row['proposals_json']), coverage,
+                        accepted_ids=accepted_proposal_ids, scene_ids=animated_scene_ids(self.service, project_id, policy(coverage))),
+                'revision': current['revision']}
+
+    def apply_proposals(self, project_id: str, proposal_id: str, accepted_proposal_ids: Optional[List[str]] = None, coverage=None) -> Dict[str, Any]:
         """Applies selected proposals non-destructively to a new revision of the montage document."""
         self.service.project(project_id)
 
@@ -56,11 +72,17 @@ class MontageInserts:
             accepted_set = set(accepted_proposal_ids)
             proposals = [p for p in proposals if p["proposal_id"] in accepted_set]
 
+        from .insert_coverage import select, animated_scene_ids, policy
+        selection = select(current_edit['document'], proposals, coverage,
+                           accepted_ids=accepted_proposal_ids, scene_ids=animated_scene_ids(self.service, project_id, policy(coverage)))
+        chosen = set(selection['selected_proposal_ids'])
+        proposals = [p for p in proposals if p['proposal_id'] in chosen]
         if not proposals:
-            return {"status": "no_changes", "applied_count": 0}
+            return {"status": "no_changes", "applied_count": 0, **selection}
 
         from .media_segment_placement import apply_full_segments
-        return apply_full_segments(self.service,project_id,proposal_id,proposals,current_edit)
+        result = apply_full_segments(self.service,project_id,proposal_id,proposals,current_edit,coverage=coverage)
+        return {**result, **selection}
 
     def rollback_proposal(self, project_id: str, proposal_id: str) -> Dict[str, Any]:
         """Rollback applied proposal to its pre-application backup montage document, protecting subsequent manual edits."""

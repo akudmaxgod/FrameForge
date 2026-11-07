@@ -149,6 +149,11 @@ class MaterialSearchPlanner:
                 if any(cid in selected_set for cid in s.get("origin_clip_ids", []))
             ]
 
+        from ..insert_coverage import animated_scene_ids, is_animated
+        animated = animated_scene_ids(self.service, project_id)
+        clip_map = {c.get('edit_clip_id') or c.get('id'): c for c in clips}
+        raw_segments = [s for s in raw_segments if not any(
+            is_animated(clip_map[cid], animated) for cid in s.get('origin_clip_ids', []) if cid in clip_map)]
         if not raw_segments:
             raise DomainError("Не найдено подходящих сегментов монтажа для выбранных сцен.", 400)
 

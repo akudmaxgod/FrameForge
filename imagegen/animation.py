@@ -4,6 +4,7 @@ import re
 from functools import lru_cache
 from .domain import DomainError
 from .ken_burns import KEN_BURNS_PRESETS
+from .animation_direction import CONTRACT as MOTION_PROMPT_CONTRACT, compile_image_motion_prompt, motion_instruction
 
 DEFAULT_ANIMATION_SETTINGS = {
     'plan_mode': 'selective',
@@ -120,7 +121,7 @@ def compile_veo_prompt(scene, camera_motion=None):
     if camera_motion is None:
         camera_motion = determine_camera_motion(scene)
     animation = scene.get('animation') or {}
-    if animation.get('motion_scope') == 'camera_only':
+    if animation.get('motion_scope') == 'camera_only' or animation.get('prompt_contract') == MOTION_PROMPT_CONTRACT:
         return compile_story_aligned_veo_prompt(
             scene, camera_motion=camera_motion, duration_seconds=animation.get('duration_seconds', 5),
         )
@@ -275,6 +276,7 @@ def build_animation_plan(project, scenes):
             elif engine == 'veo_lite': veo_count += 1
             else: kb_count += 1
         animation = {
+            'prompt_contract': MOTION_PROMPT_CONTRACT,
             'mode': 'manual' if manual else 'auto', 'selected_engine': engine,
             'recommendation': engine if settings['plan_mode']=='selective' or manual else 'omni_flash',
             'animation_score': item['score'], 'reasons': item['reasons'],
@@ -286,6 +288,9 @@ def build_animation_plan(project, scenes):
             'safe_crop': {'overscan': .15, 'max_pan_x': .08, 'max_pan_y': .05, 'edge_safe': True, 'fallback': 'slow_zoom_in'},
         }
         if kb_preset: animation['safe_crop']['actual_preset'] = kb_preset
+        for key in ('motion_scope', 'visual_motion'):
+            if key in existing:
+                animation[key] = existing[key]
         if settings['plan_mode']=='selective':
             motion=smart_ken_burns_motion(item['data'],item['position'])
             animation['ken_burns_mode']=existing.get('ken_burns_mode','auto')
@@ -425,6 +430,9 @@ def compile_story_aligned_veo_prompt(scene_data, characters=None, location=None,
             f"Camera: {camera_motion}.\n"
             "No body movement, falls, impacts, injuries, new people, new props, morphing or text overlays."
         )
+
+    if (scene_data.get('animation') or {}).get('prompt_contract') == MOTION_PROMPT_CONTRACT:
+        return compile_image_motion_prompt(scene_data, camera_motion)
 
     beat = str(scene_data.get('beat') or scene_data.get('source_quote') or '').strip()
 
@@ -582,6 +590,12 @@ def build_animation_passport(project, scene, scenes=None, cast_map=None,
     motion_scope = (scene_data.get('animation') or {}).get('motion_scope', 'story_action')
     if motion_scope == 'camera_only':
         micro_actions = dict.fromkeys(micro_actions, "Keep the depicted moment unchanged; move only the camera.")
+    elif (scene_data.get('animation') or {}).get('prompt_contract') == MOTION_PROMPT_CONTRACT:
+        micro_actions = {
+            '0_2s': 'Begin from the supplied image without resetting the scene.',
+            '2_5s': motion_instruction(scene_data),
+            '5_8s': 'Maintain the same continuous shot and scene; do not invent a final event.',
+        }
 
     prompt = compile_story_aligned_veo_prompt(
         scene_data, characters=char_list, location=location, props=active_props,

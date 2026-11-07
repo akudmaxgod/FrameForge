@@ -440,3 +440,18 @@
 .timeline-block-overlay.disabled{opacity:.35;filter:grayscale(.8);}
 .montage-layer-actions{padding:10px;border:1px solid #624690;border-radius:8px;display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
 .montage-layer-actions p{width:100%;margin:0 0 5px;font-size:12px;}
+
+/* A transition is anchored in timeline pixels, never in normal button flow.
+   Reserve a separate hit-target row below the video clips at every zoom. */
+.timeline-lane-video,.timeline-label-video{height:106px;}
+.timeline-lane-video>.timeline-block-video{bottom:28px;}
+.timeline-lane-video>.timeline-transition{
+ position:absolute;top:94px;transform:translate(-50%,-50%);
+ width:18px;min-width:0;max-width:18px;height:18px;min-height:0;
+ margin:0;padding:0;display:grid;place-items:center;
+ border:1px solid #9875d4;border-radius:4px;background:#171226;
+ color:#ede0ff;font-size:16px;line-height:1;z-index:8;
+ cursor:pointer;touch-action:manipulation;box-sizing:border-box;
+}
+.timeline-lane-video>.timeline-transition:hover{background:#573684;border-color:#d8beff;}
+.timeline-lane-video>.timeline-transition:focus-visible{outline:2px solid #fff;outline-offset:2px;}
