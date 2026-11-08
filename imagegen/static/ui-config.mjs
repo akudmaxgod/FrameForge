@@ -5,6 +5,12 @@ export const STYLE_PRESETS = [
     prompt: 'Cinematic photorealism, realistic human faces and anatomy, natural skin texture, physically accurate materials, soft natural lighting, realistic shadows, cinematic composition, subtle color grading, highly detailed live-action film still'
   },
   {
+    id: 'cinematic-fantasy', name: 'Кинематографическое фэнтези', subtitle: 'Cinematic Fantasy',
+    image: '/presets/cinematic-fantasy.png',
+    description: 'Реалистичные фактуры, холодная дымка вдали и один тёплый акцент на крупном переднем плане.',
+    prompt: 'Cinematic fantasy film still, realistic tactile skin, weathered stone, worn fabric and natural materials, restrained painterly finish. Atmospheric perspective with soft mist and a cool muted slate-blue background. A single motivated warm light accent on the story-relevant subject. Locked-camera composition, readable foreground silhouette with space around its outline, clear separation from the quiet background. Preserve the scene action, cast and setting. No motion blur, text or watermarks.'
+  },
+  {
     id: 'medieval', name: 'Средневековая киноживопись', subtitle: 'Medieval Epic', image: '/presets/medieval.png',
     description: 'Эпическая историческая живопись с фактурными мазками, глубокой светотенью и тёплыми искрами огня.',
     prompt: 'Epic medieval historical cinematic digital painting, richly detailed painterly realism with visible fine brush texture, dramatic storytelling composition and layered foreground, midground and background. Warm amber firelight and glowing embers contrasted with cool blue-gray daylight, atmospheric smoke and mist, weathered stone, rough timber, forged iron, worn leather and natural linen, tactile historically grounded materials, expressive natural anatomy, restrained earthy colors with crimson accents, deep chiaroscuro, sweeping castle landscapes where appropriate. Preserve the actual subjects, actions and setting of the scene; do not add castles, soldiers, weapons or fire unless the story calls for them. No modern objects, no text or watermarks.'

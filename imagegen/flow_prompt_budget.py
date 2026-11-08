@@ -22,10 +22,12 @@ GRITTY_COMPACT = (
 
 def units(text):return len(text.encode('utf-16-le'))//2
 
-def pack(prompt):
-    if units(prompt)<=BASE_BUDGET:return prompt
+def pack(prompt, *, budget=BASE_BUDGET):
+    if units(prompt)<=budget:return prompt
     marker='\nFINAL RENDER CONTRACT (scene constraints; never image lettering):\n'
     body,sep,encoded=prompt.partition(marker)
+    packed_marker='\nRENDER CONSTRAINTS (never image lettering):'
+    body,packed_sep,packed_contract=body.partition(packed_marker)
     body=body.replace(marker_contract(True),MARKER_WIRE).replace(MEDICAL_STORY,MEDICAL_COMPACT)
     body=body.replace(SOURCE_PEOPLE_UNSPECIFIED,PEOPLE_COMPACT)
     if GRITTY_FLOW_STYLE in body:
@@ -38,6 +40,14 @@ def pack(prompt):
         )
     # These are application-owned boilerplate, not arbitrary narration spans.
     replacements=[
+      (re.escape(PEOPLE_COMPACT),
+       'Only source-required people/body parts and actions. Unnamed actors stay generic. No invented census, identity or illness. Mentioned authors/statues/portraits are not living actors.'),
+      (re.escape('Match subjects and location setting to attached reference images. Photorealistic, clean crisp focus, cinematic film still.'),
+       'Match attached identities and setting. Photorealistic crisp cinematic still.'),
+      (re.escape('Preserve their source activity and group/single multiplicity. These are source subjects, not individual portrait identities; no fixed portrait is required for them.'),
+       'Preserve source activity and group/single multiplicity. Generic roles need no fixed portrait.'),
+      (re.escape('Preserve the face, hands, body plan and wardrobe of the description and matching reference. Add no animal traits or extra limbs.'),
+       'Match described/reference face, hands, body and wardrobe. No animal traits or extra limbs.'),
       (r'Full-body composition: show every visible character as a complete, anatomically coherent figure with head, torso, two arms, two complete legs and both feet visibly supported by the floor, ground, stairs, deck or other surface\. Never crop, fade, merge or omit the lower body\.',
        'Full body: head/torso, two arms, two hands, two complete legs and both feet supported by the source surface. Never crop, fade, merge or omit the lower body.'),
       (r'If the frame shows any part of a character below the waist, render the lower body as anatomically complete and physically supported; never create floating torsos, missing legs or fused limbs\.',
@@ -64,6 +74,8 @@ def pack(prompt):
        'Vary framing only; preserve event, era, actors and uncertainty. Widen for required action/actors. Object-only: focus on object. Invent no patient, doctor, symptom, injury, blood, procedure, instrument or anatomy.'),
     ]
     for pattern,replacement in replacements:body=re.sub(pattern,lambda _:replacement,body)
+    if packed_sep:
+        body+=packed_marker+packed_contract
     if sep:
         contract=json.loads(encoded)
         # Hashes, proof excerpts and audit-process prose do not direct pixels.

@@ -1,3 +1,4 @@
+import {foregroundPairDialog} from './montage-foreground.mjs';
 import {overlayFootage,segmentDuration,setClipSpeed} from './montage-layers.mjs';
 import {normalize} from './montage-timeline.mjs';
 import {MontagePlayer} from './montage-player.mjs';
@@ -43,6 +44,12 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
       sessions.set(id,state);return state;
     })());
     try{s=await loadingSessions.get(id);}finally{loadingSessions.delete(id);}
+  }else if(!s.dirty&&!s.promise){
+    const result=await api(`/projects/${id}/edit`);
+    if(!s.dirty&&!s.promise&&result.revision>s.revision){
+      s.doc=result.document;s.revision=result.revision;s.sources=result.sources;s.lastExport=result.last_export_id;
+      s.history=[];s.future=[];
+    }
   }
   const root=node('section',undefined,'workspace montage');host.append(root);
   root.addEventListener('montage-error',e=>notice(e.detail.message,true));
@@ -272,7 +279,45 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
     });
     field(advanced,'Сохранить выбор исходного кадра при подборе',base.media_replacement_locked,v=>edit(()=>base.media_replacement_locked=v),{type:'checkbox'});
     field(advanced,'Сохранить ручные границы при подгонке',c.timing_locked||c.manual_timing,v=>edit(()=>{c.timing_locked=v;c.manual_timing=v;c.allow_voice_retime=!v;}),{type:'checkbox'});
-    if(c.media_type==='image')inspector.append(node('p',c.camera_motion?'2.5D из исходного изображения: движение рассчитано на длительность клипа.':'Неподвижное изображение удерживается весь интервал.'));
+    if(c.media_type==='image'){
+      const layer = c === base ? 'base' : 'footage';
+      const prepare = endpoint => async settings => {
+          await flush(s);
+          const version = s.version, expected_revision = s.revision;
+          const result = await api(`/projects/${id}/edit/${endpoint}`,{
+            ...settings, layer, clip_id:base.edit_clip_id, expected_revision
+          });
+          const commit = ()=>{
+            const current = s.doc.clips.find(item=>item.edit_clip_id===base.edit_clip_id);
+            const target = layer==='footage' ? current?.footage_overlay : current;
+            if(disposed || s.version!==version || s.revision!==expected_revision || target!==c)
+              throw Error('Монтаж изменился. Откройте эффект заново.');
+            edit(()=>{target.foreground_effect=result.effect;});
+            const active = normalize(s.doc).clips.find(item=>item.edit_clip_id===base.edit_clip_id);
+            if(active){
+              const peak = result.effect.mode === 'glint' ? result.effect.peak : .5;
+              const span = Math.max(0, active.base_duration_ms - 1000/24);
+              player.seek(active.start_ms + span * peak);
+            }
+            notice('Передний план оживлён. Эффект можно отключить в свойствах клипа.');
+          };
+          return Object.assign(commit,{effect:result.effect});
+      };
+      inspector.append(button('Параллакс из двух изображений',()=>{
+        player.pause();
+        foregroundPairDialog(c,{beat:scene?.data?.beat},prepare('foreground-pair'));
+      }));
+      if(c.foreground_effect?.mode==='parallax'){
+        field(inspector,'Смещение по горизонтали, %',Number((c.foreground_effect.shift_x*100).toFixed(2)),
+          value=>edit(()=>{c.foreground_effect.shift_x=value/100;}),{min:-6,max:6,step:.2});
+        field(inspector,'Смещение по вертикали, %',Number((c.foreground_effect.shift_y*100).toFixed(2)),
+          value=>edit(()=>{c.foreground_effect.shift_y=value/100;}),{min:-6,max:6,step:.2});
+      }
+      if(c.foreground_effect)inspector.append(button('Отключить эффект переднего плана',()=>{
+        player.pause();edit(()=>{if(c.foreground_effect.flow_pair)c.foreground_pair_disabled=c.source_image_asset_id;delete c.foreground_effect;});
+      }));
+    }
+    if(c.media_type==='image')inspector.append(node('p',c.foreground_effect?.mode==='parallax'?'Передний план движется целиком, задник неподвижен.':c.foreground_effect?.motion?'Видео передней сцены поверх неподвижного фона.':c.foreground_effect?.flow_pair?'Для этого кадра ещё нет видео переднего плана. Запустите генерацию в Flow.':c.foreground_effect?'Фон неподвижен. Эффект действует только на переднем плане.':c.camera_motion?'2.5D из исходного изображения: движение рассчитано на длительность клипа.':'Неподвижное изображение удерживается весь интервал.'));
     if(c.hold_last_ms)field(inspector,'Стоп-кадр в конце, с',Number((c.hold_last_ms/1000).toFixed(2)),v=>set('hold_last_ms',v*1000),{max:86400,step:.01});
     if(c.media_type==='image')field(inspector,'Длительность изображения, с',(c.trim_out_ms-c.trim_in_ms)/1000,v=>set('trim_out_ms',c.trim_in_ms+v*1000),{min:1/24,max:86400,step:.01});
     else{
@@ -375,6 +420,6 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   render();showJob();if(s.dirty&&!s.conflict)s.timer=setTimeout(()=>flush(s).catch(e=>notice(e.message,true)),650);
   const last=s.lastExport||localStorage.getItem(key(id)+':job');if(last){job={id:last};poll();}
   let updating=false;
-  return {projectId:id,async prepareMaintenance(){player.pause();await flush(s);},async updateProject(next){if(updating||disposed)return;updating=true;project=next;sceneMap.clear();for(const scene of next.scenes)sceneMap.set(scene.id,scene);try{const result=await api(`/projects/${id}/edit`);if(!disposed){s.sources=result.sources;if(!s.dirty&&!s.promise&&!player.playing&&result.revision!==s.revision){s.doc=result.document;s.revision=result.revision;s.history=[];s.future=[];render();showJob();}else renderInspector(normalize(s.doc));if(result.last_export_id&&result.last_export_id!==s.lastExport&&!['queued','running'].includes(job?.status)){s.lastExport=result.last_export_id;job={id:s.lastExport,announce:true};poll();}}}catch{}finally{updating=false;}},dispose(){disposed=true;document.removeEventListener('keydown',keyboard);fit.dispose();if(s.notify===saveStatus)s.notify=null;clearTimeout(timer);lanes.dispose();player.dispose();window.removeEventListener('beforeunload',unload);if(s.dirty)flush(s).catch(()=>{});}};
+  return {projectId:id,async prepareMaintenance(){player.pause();await flush(s);},async updateProject(next){if(updating||disposed)return;updating=true;project=next;sceneMap.clear();for(const scene of next.scenes)sceneMap.set(scene.id,scene);try{const result=await api(`/projects/${id}/edit`);if(!disposed){s.sources=result.sources;if(!s.dirty&&!s.promise&&!player.playing&&result.revision!==s.revision){s.history=[...s.history,copy(s.doc)].slice(-60);s.doc=result.document;s.revision=result.revision;s.future=[];render();showJob();}else renderInspector(normalize(s.doc));if(result.last_export_id&&result.last_export_id!==s.lastExport&&!['queued','running'].includes(job?.status)){s.lastExport=result.last_export_id;job={id:s.lastExport,announce:true};poll();}}}catch{}finally{updating=false;}},dispose(){disposed=true;document.removeEventListener('keydown',keyboard);fit.dispose();if(s.notify===saveStatus)s.notify=null;clearTimeout(timer);lanes.dispose();player.dispose();window.removeEventListener('beforeunload',unload);if(s.dirty)flush(s).catch(()=>{});}};
 }
 

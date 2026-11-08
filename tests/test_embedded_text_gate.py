@@ -30,6 +30,13 @@ class EmbeddedTextGateTests(unittest.TestCase):
                                   fill=(165, 225, 245), font=self.font(30))
         self.assertTrue(Worker._has_embedded_text(image))
 
+    def test_floating_words_remain_rejected(self):
+        image = self.canvas()
+        ImageDraw.Draw(image).text(
+            (130, 230), 'IF YOU HEAR A STREAM DO NOT SEEK IT KEEP WALKING AWAY',
+            fill=(185,210,205), font=self.font(30))
+        self.assertTrue(Worker._has_embedded_text(image))
+
     def test_speech_bubble_remains_rejected(self):
         image = Image.new('RGB', (1024, 576), (150, 170, 160))
         draw = ImageDraw.Draw(image)
@@ -55,6 +62,18 @@ class EmbeddedTextGateTests(unittest.TestCase):
         image = self.canvas()
         draw = ImageDraw.Draw(image)
         draw.rectangle((130, 460, 550, 510), fill=(240, 243, 245))
+        self.assertFalse(Worker._has_embedded_text(image))
+
+    def test_near_stone_highlights_are_allowed(self):
+        image = self.canvas()
+        with Image.open(Path(__file__).parent / 'fixtures/riverbank_stone_highlights.png') as crop:
+            image.paste(crop, (170, 200))
+        self.assertFalse(Worker._has_embedded_text(image))
+
+    def test_moss_highlights_are_allowed(self):
+        image = self.canvas()
+        with Image.open(Path(__file__).parent / 'fixtures/moss_stone_highlights.png') as crop:
+            image.paste(crop, (210, 390))
         self.assertFalse(Worker._has_embedded_text(image))
 
 

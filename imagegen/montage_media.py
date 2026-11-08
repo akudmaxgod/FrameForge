@@ -29,6 +29,8 @@ class StillReader:
     def __init__(self,path,clip):
         with Image.open(path) as image:self.source=image.convert('RGB')
         self.clip=clip
+        self.static_frame = None
+        self.static_geometry = None
 
     def image(self,seconds,size,fill=False):
         plan=self.clip.get('camera_motion')
@@ -50,16 +52,24 @@ class StillReader:
             else:
                 scale=min(size[0]/self.source.width,size[1]/self.source.height)
                 output_size=(max(1,round(self.source.width*scale)),max(1,round(self.source.height*scale)))
-            moving=self.source.transform(output_size,Image.Transform.AFFINE,
-                (w/output_size[0],0,x,0,h/output_size[1],y),resample=Image.Resampling.BICUBIC)
-            if fill:return moving
-            canvas=Image.new('RGB',size,'black')
-            canvas.paste(moving,((size[0]-moving.width)//2,(size[1]-moving.height)//2))
+            # Resize directly from a fractional box, as in the local 2.5D renderer.
+            moving = self.source.resize(output_size, Image.Resampling.BICUBIC,
+                                        box=(x, y, min(self.source.width, x+w),
+                                             min(self.source.height, y+h)))
+            if output_size == size:
+                return moving
+            canvas = Image.new('RGB', size, 'black')
+            canvas.paste(moving, ((size[0]-moving.width)//2, (size[1]-moving.height)//2))
             return canvas
-        if fill:return ImageOps.fit(self.source,size,Image.Resampling.BICUBIC)
-        image=ImageOps.contain(self.source,size,Image.Resampling.BICUBIC)
-        canvas=Image.new('RGB',size,'black')
-        canvas.paste(image,((size[0]-image.width)//2,(size[1]-image.height)//2))
-        return canvas
+        geometry = (size, fill)
+        if geometry != self.static_geometry:
+            image = (ImageOps.fit if fill else ImageOps.contain)(self.source, size, Image.Resampling.BICUBIC)
+            if image.size != size:
+                canvas = Image.new('RGB', size, 'black')
+                canvas.paste(image, ((size[0]-image.width)//2, (size[1]-image.height)//2))
+                image = canvas
+            self.static_geometry = geometry
+            self.static_frame = image
+        return self.static_frame
 
     def close(self):self.source.close()

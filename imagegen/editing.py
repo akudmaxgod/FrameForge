@@ -211,6 +211,10 @@ class Editing:
                     except Exception as error:
                         raise DomainError('Источник миниатюры должен быть изображением.') from error
                     self._image_cache.add(image_key)
+            if c.get('foreground_effect') is not None:
+                from .montage_foreground import validate_effect
+                validate_effect(self.service, project_id, c,
+                                asset if c.get('source_image_asset_id') else {})
             if c.get('camera_motion'):
                 if media_type!='image':raise DomainError('Движение камеры требует исходного изображения.')
                 from .montage_media import camera_plan
@@ -300,6 +304,25 @@ class Editing:
         doc = copy.deepcopy(data.get('document', current['document']))
         doc = self.validate(project_id, doc)
         scenes = self.service.detail(project_id)['scenes']
+        from .flow_foreground import effects
+        pairs = effects(self.service, project_id)
+
+        def attach_pair(clip, scene, image):
+            current_effect = clip.get('foreground_effect') or {}
+            pair = pairs.get((image, scene['current_revision']))
+            if (pair and clip.get('source_scene_revision') == scene['current_revision']
+                    and clip.get('media_type') == 'image'
+                    and (data.get('foreground_pairs') or not clip.get('camera_motion'))
+                    and clip.get('foreground_pair_disabled') != image
+                    and (not current_effect
+                         or (data.get('add_only') and current_effect.get('mode') in ('local_25d', 'paired'))
+                         or (data.get('foreground_pairs') and current_effect.get('flow_pair')
+                             and current_effect.get('mode') == 'parallax' and not current_effect.get('layout'))
+                         or (data.get('foreground_pairs') and current_effect.get('auto')))):
+                clip.pop('foreground_pair_disabled', None)
+                clip.pop('camera_motion', None)
+                clip['foreground_effect'] = pair
+
         by_scene = {c['scene_id']: c for c in doc['clips'] if c.get('source_kind', 'scene') == 'scene'}
         independent_scenes = {c.get('origin_scene_id') for c in doc['clips'] if c.get('source_kind') == 'footage'}
         selected = data.get('clip_ids')
@@ -310,9 +333,13 @@ class Editing:
             if s.get('stale') or (video and s.get('video_stale')) or (not video and not image):
                 continue
             old = by_scene.get(s['id'])
-            if not old and s['id'] in independent_scenes:
+            if not old and (data.get('existing_only') or s['id'] in independent_scenes):
                 continue
-            if old and (data.get('add_only') or (selected is not None and old['edit_clip_id'] not in selected)):
+            if old and selected is not None and old['edit_clip_id'] not in selected:
+                continue
+            if old and data.get('add_only'):
+                if not video and old.get('source_image_asset_id') == image:
+                    attach_pair(old, s, image)
                 continue
             if not old and selected is not None:
                 continue
@@ -322,9 +349,14 @@ class Editing:
             planned_ms = round(planned_seconds*1000) if type(planned_seconds) in (int, float) and 1 <= planned_seconds <= 60 else 5000
             initial_ms = min(duration, planned_ms) if video and s.get('data', {}).get('prompt_timing') else duration if video else planned_ms
             c = old or {'edit_clip_id':uid(),'scene_id':s['id'],'trim_in_ms':0,'trim_out_ms':initial_ms,'excluded':False,'volume':1,'muted':True}
+            if video or c.get('source_image_asset_id') != (generation or {}).get('asset_id'):
+                c.pop('foreground_effect', None)
+                c.pop('foreground_pair_disabled', None)
             c.update(source_video_asset_id=video, source_image_asset_id=(generation or {}).get('asset_id'), source_scene_revision=s['current_revision'], source_duration_ms=duration)
             if video:c.pop('media_type',None);c.pop('camera_motion',None)
-            else:c['media_type']='image'
+            else:
+                c['media_type']='image'
+                attach_pair(c, s, image)
             if c['trim_out_ms'] > duration or c['trim_in_ms'] >= duration-1000/24:
                 c['trim_out_ms'] = duration
                 c['trim_in_ms'] = min(c['trim_in_ms'], max(0, duration-1000/24))

@@ -437,18 +437,31 @@ def is_literal_animal_reference(character):
     return bool(_LITERAL_ANIMAL_REFERENCE_CUE.search(text))
 
 
-def nonhuman_scale_instruction(characters, compact=False):
+def layered_creature(project, character):
+    return (project.get('flow_composition') == 'foreground'
+            and isinstance(character, dict) and character.get('entity_type') == 'creature')
+
+
+def nonhuman_scale_instruction(characters, compact=False, *, project=None):
     """Keep wildlife at species scale and fictional creatures at story scale."""
     creatures = [c for c in characters if isinstance(c, dict) and c.get('entity_type') == 'creature']
     animals = [c for c in characters if is_nonhuman_character(c) and c not in creatures]
-    creature_rule = ''
-    if creatures:
-        names = ', '.join(c['name'] for c in creatures)
-        creature_rule = (
+    creature_rules = []
+    for creature in creatures:
+        if layered_creature(project or {}, creature):
+            description = str(creature.get('description') or '').strip()
+            creature_rules.append(
+                f"Character identity for {creature['name']}: {description}. Preserve the face, hands, body plan "
+                "and wardrobe of the description and matching reference. Add no animal traits or extra limbs.")
+    strict = [c['name'] for c in creatures if not layered_creature(project or {}, c)]
+    if strict:
+        names = ', '.join(strict)
+        creature_rules.append(
             f"Creature anatomy for {names}: preserve the reference's non-human body plan, "
             "including its natural limbs, wings and tail where present. No humanoid body, human face, hands or clothing. "
             "Use the creature's scale at this point in the story."
         )
+    creature_rule = ' '.join(creature_rules)
     if not animals:
         return creature_rule
     base = ('SPECIES SCALE INVARIANT: use real-world adult dimensions and natural proportions of referenced wildlife; '
@@ -2507,6 +2520,10 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
         if not character.get('locked'):
             if not allow_unlocked:
                 raise DomainError(f"Сначала LOCK персонажа {character['name']}.", 409)
+            if layered_creature(project, character):
+                lines.append(f"Fictional character {index}: {char_tag}. Preserve the described appearance and body plan: "
+                             f"{character['description']}.")
+                continue
             if is_nonhuman_character(character):
                 lines.append(f"Non-human subject {index}: {char_tag}. Appearance and anatomy: {character['description']}. "
                              "Preserve its species and body plan. No human face, body, hands or clothing.")
@@ -2524,6 +2541,10 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
         references.append({'asset_id': refs['portrait'], 'character_id': character['id'],
                            'revision': character['revision'], 'role': 'portrait',
                            'entity_type': character['entity_type']})
+        if layered_creature(project, character):
+            lines.append(f"Reference image {index}: {char_tag}. Preserve this fictional character's face, "
+                         f"silhouette and described anatomy: {character['description']}.")
+            continue
         if is_nonhuman_character(character):
             lines.append(f"Reference image {index}: {char_tag}. Preserve this non-human subject's species, "
                          f"body plan, markings and distinguishing features: {character['description']}. "
@@ -2662,7 +2683,7 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
     if isinstance(forgotten_contract, dict) and forgotten_contract.get('compiled_prompt'):
         lines.append(forgotten_contract['compiled_prompt'])
     if any(is_nonhuman_character(character) for character in characters):
-        lines.append(nonhuman_scale_instruction(characters))
+        lines.append(nonhuman_scale_instruction(characters, project=project))
     local_event = ' '.join(str(scene.get(key, '')) for key in ('source_quote', 'beat')).casefold()
     if not source_depicts_death(scene):
         lines.append('Do not invent death, injury, blood, a corpse, predation, attack, suffering or any other tragedy. Show only the source-described living event.')
@@ -2711,7 +2732,8 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
     elif (scene.get('forgotten_cities_prompt_contract') or {}).get('source_binding') == 'artifact_detail':
         lines.append('One coherent close-up of the source-bound artifact; preserve its markings, scale and attachment features.')
     elif has_living_nonhuman:
-        lines.append('One coherent image showing the source-described animals, their activity and setting; no invented human observers.')
+        subject = 'subjects' if any(layered_creature(project, c) for c in characters) else 'animals'
+        lines.append(f'One coherent image showing the source-described {subject}, their activity and setting; no invented human observers.')
     else:
         lines.append('One coherent environmental image with clear spatial relationships. The composition remains '
                      'empty of inhabitants and observers; show only the described setting and inanimate phenomena.')
@@ -2745,9 +2767,12 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
         prompt += '\n' + qualifier + scene['manual_prompt']
 
     from .frame_composition import instruction as camera_instruction
-    from .camera_profiles import instruction as project_camera
+    from .camera_profiles import depth_instruction, instruction as project_camera
     camera=camera_instruction(scene) or project_camera(camera_project, scene)
     if camera:prompt+='\n'+camera
+    depth = depth_instruction(project)
+    if depth:
+        prompt += '\n' + depth
 
     compiled_style_contract = ""
     bundle = None
@@ -2971,6 +2996,7 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
     char_names = []
     human_char_names = []
     nonhuman_char_names = []
+    preserve_creature = any(layered_creature(project, c) for c in characters)
     for c in characters:
         c_name = c['name'] if isinstance(c, dict) else str(c)
         if c_name:
@@ -3015,7 +3041,12 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
             parts.append("Solo shot, exactly 1 person in the scene, no other people")
     elif visible_people == 0:
         viewpoint_hand = scene_has_anonymous_viewpoint_hand(scene)
-        if char_names and viewpoint_hand:
+        if char_names and preserve_creature:
+            subject = ', '.join(char_names)
+            parts.append(f"Feature {subject} once, with the specified anatomy intact. No additional people or duplicate figures.")
+            if viewpoint_hand:
+                parts.append("Include the source-described anonymous gloved hand at the edge of the first-person view.")
+        elif char_names and viewpoint_hand:
             parts.append(f"Feature only the referenced non-human subject {', '.join(char_names)} plus exactly one anonymous gloved human hand at edge of first-person POV. No human face, head, torso or duplicate people.")
         elif char_names:
             parts.append(f"Feature only the referenced non-human subject {', '.join(char_names)}. No humans, human silhouettes or human body parts.")
@@ -3046,8 +3077,11 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
         else:
             parts.append(f"Use only attached reference identity for {', '.join(human_char_names)}. Keep the distinct clothing palette and stick-figure silhouette; show simple reference facial marks only when the shot scale calls for them" if marker_style else f"Use only attached reference identity for {', '.join(human_char_names)}. Preserve exact face, hair, age, body type and skin tone in every frame; never substitute another person")
     if nonhuman_char_names:
-        parts.append(f"Show each featured animal {', '.join(nonhuman_char_names)} as one complete, continuous and recognisable creature: head and eyes visible, full torso, all natural limbs visibly supported. Never show only legs, hindquarters, torso, a cropped body fragment or a duplicate animal")
-        parts.append(nonhuman_scale_instruction(characters, compact=True))
+        if preserve_creature:
+            parts.append(f"Keep {', '.join(nonhuman_char_names)} recognizable in a coherent pose with an intact silhouette.")
+        else:
+            parts.append(f"Show each featured animal {', '.join(nonhuman_char_names)} as one complete, continuous and recognisable creature: head and eyes visible, full torso, all natural limbs visibly supported. Never show only legs, hindquarters, torso, a cropped body fragment or a duplicate animal")
+        parts.append(nonhuman_scale_instruction(characters, compact=True, project=project))
         literal_animal_names = [
             f"@{c['name']}" if isinstance(c, dict) and c.get('name') and not str(c['name']).startswith('@')
             else str(c.get('name', '')) if isinstance(c, dict) else str(c)
@@ -3194,11 +3228,15 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
             parts.append(context_instruction(location['name']))
 
     from .frame_composition import instruction as camera_instruction
-    from .camera_profiles import instruction as project_camera
+    from .camera_profiles import depth_instruction, instruction as project_camera
     camera=camera_instruction(scene) or project_camera(camera_project, scene)
     if camera:parts.append(camera)
+    depth = depth_instruction(project)
+    parts.append(depth)
     prompt = '. '.join(p for p in parts if p)
     prompt = re.sub(r'\.+', '.', prompt).strip()
+    if depth and scene.get('manual_prompt'):
+        prompt += '\nShot-specific layer staging: ' + scene['manual_prompt']
     priority = _forgotten_scene_priority(scene, locations)
     return priority + prompt if priority else prompt
 

@@ -122,7 +122,7 @@ class Application:
             owner=service.db.one('SELECT project_id FROM '+parts[1]+' WHERE id=?',(parts[2],))
             if owner:service.project(owner['project_id'])
         if method == 'GET' and path == '/api/editorial-capabilities':
-            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc3', 'bridge_version': '0.1.89'}
+            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc4', 'bridge_version': '0.1.93'}
         if method == 'GET' and path == '/api/session':
             return {'token': self.token}
         if method == 'GET' and path == '/api/settings':
@@ -255,6 +255,8 @@ class Application:
                 'image_concurrency': bridge.get('image_concurrency', 1),
                 'active_image_requests': bridge.get('active_image_requests', 0),
                 'animations_only': bridge.get('animations_only', False),
+                'foreground_pairs': bridge.get('foreground_pairs', False),
+                'foreground_direct': bridge.get('foreground_direct', False),
                 'video_recovery': bridge.get('video_recovery', False),
                 'animation_direction_refresh': bridge.get('animation_direction_refresh', False),
                 'animation_direction_contract': bridge.get('animation_direction_contract'),
@@ -296,6 +298,8 @@ class Application:
                     bridge['quota_admission']=data.get('quota_admission') is True
                     bridge['images_only']=data.get('images_only') is True
                     bridge['animations_only']=data.get('animations_only') is True
+                    bridge['foreground_pairs']=data.get('foreground_parallax') is True
+                    bridge['foreground_direct']=data.get('foreground_direct') is True
                     bridge['video_recovery']=data.get('video_recovery') is True
                     bridge['animation_direction_refresh']=data.get('animation_direction_refresh') is True
                     bridge['animation_direction_contract']=data.get('animation_direction_contract') if data.get('animation_direction_contract') == 'image-motion/3' else None
@@ -318,11 +322,22 @@ class Application:
             generation_ids = (data or {}).get('generation_ids')
             batch_stage = (data or {}).get('batch_stage')
             animations_only = data.get('animations_only') is True
+            if action not in ('start', 'pause', 'check') or not isinstance(project_id, str):
+                raise DomainError('Некорректная команда моста.', 400)
+            full_scene_batch = (action == 'start' and scene_ids is None and generation_ids is None
+                                and batch_stage in (None, 'scenes') and not animations_only)
+            project = service.project(project_id) if full_scene_batch else {}
+            foreground_pairs = data.get('foreground_pairs') is True or project.get('flow_composition') == 'foreground'
+            direct_layers = foreground_pairs and project.get('flow_layer_source') == 'direct'
+            if foreground_pairs:
+                if not full_scene_batch:
+                    raise DomainError('Живой передний план запускается для всего проекта.', 400)
+                data = {**data, 'images_only': True}
+                if direct_layers:
+                    batch_stage = 'scenes'
             if animations_only and (action != 'start' or not scene_ids or generation_ids is not None
                                     or batch_stage is not None or data.get('images_only')):
                 raise DomainError('Для запуска анимации выберите кадры без режима генерации изображений.', 400)
-            if action not in ('start', 'pause', 'check') or not isinstance(project_id, str):
-                raise DomainError('Некорректная команда моста.', 400)
             forgotten = service._project_profile_type(project_id) == 'forgotten_cities'
             if batch_stage is not None:
                 if (batch_stage not in ('portraits', 'scenes') or action != 'start'
@@ -367,6 +382,13 @@ class Application:
                 unavailable = (time.time() - bridge['last_seen'] >= BRIDGE_ADAPTER_TTL or not bridge['adapter_connected'] or not bridge['adapter_instance_id'])
                 if unavailable:
                     raise DomainError('Мост Flow не подключён. Откройте FrameForge Bridge и дождитесь подключения.', 409)
+                if foreground_pairs:
+                    if direct_layers and not bridge.get('foreground_direct'):
+                        raise DomainError('Обновите FrameForge Flow Bridge до 0.1.93 и перезагрузите вкладку Flow.', 409)
+                    if not bridge.get('foreground_pairs'):
+                        raise DomainError('Обновите FrameForge Flow Bridge до 0.1.92 и перезагрузите вкладку Flow.', 409)
+                    if bridge['running'] or bridge['command'] or bridge.get('active_image_requests'):
+                        raise DomainError('Flow занят. Дождитесь завершения текущей операции.', 409)
                 if batch_stage is not None:
                     if not bridge.get('staged_image_batch'):
                         raise DomainError('Обновите FrameForge Flow Bridge до 0.1.82 и перезагрузите вкладку Flow.', 409)
@@ -405,6 +427,10 @@ class Application:
                     command['batch_stage'] = batch_stage
                 if animations_only:
                     command['animations_only'] = True
+                if foreground_pairs:
+                    command['foreground_pairs'] = True
+                if direct_layers:
+                    command['direct_layers'] = True
                 bridge['command'] = command
                 if action == 'start':
                     bridge['animation_scene_ids'] = scene_ids
@@ -666,6 +692,23 @@ class Application:
                     )
                 raise DomainError('Ресурс material-search не найден.', 404)
             if len(parts) >= 4 and parts[3] == 'edit':
+                if len(parts) == 5 and parts[4] == 'flow-layers':
+                    from . import flow_foreground
+                    direct = service.project(project_id).get('flow_layer_source') == 'direct'
+                    if direct:
+                        from . import flow_direct_layers
+                    if method == 'GET':
+                        return (flow_direct_layers if direct else flow_foreground).list_jobs(service, project_id)
+                    if method == 'POST' and data.get('action') == 'save':
+                        if direct:
+                            return flow_direct_layers.save_result(service, project_id, data, self.worker.validate_external_scene_image)
+                        return flow_foreground.save_result(service, project_id, data)
+                    if method == 'POST' and data.get('action') == 'finish':
+                        return flow_foreground.finish(service, project_id, data.get('expected_revision'), direct=direct)
+                    raise DomainError('Неизвестное действие со слоями Flow.')
+                if len(parts) == 5 and parts[4] == 'foreground-pair' and method == 'POST':
+                    from .montage_foreground import prepare_pair
+                    return prepare_pair(service, project_id, data or {})
                 if len(parts) == 5 and parts[4] == 'media-folder':
                     if method == 'GET': return service.media_folder.latest(project_id)
                     if method == 'POST': return service.media_folder.start(project_id, data or {})
@@ -1172,6 +1215,10 @@ def make_server(app, port=8765):
                     if self.headers.get('X-Session-Token') != app.token and not is_flow:
                         raise DomainError('Недействительная сессия. Перезагрузите страницу.', 403)
                     length = int(self.headers.get('Content-Length', '0'))
+                    if path.endswith('/edit/flow-layers') and not 0 < length <= 16_100_000:
+                        raise DomainError('Изображение слоя Flow превышает лимит 12 МБ.', 413)
+                    if path.endswith('/edit/foreground-pair') and not 0 < length <= 33_000_000:
+                        raise DomainError('Загрузите два слоя размером до 12 МБ каждый.', 413)
                     if path.startswith('/api/projects/') and path.endswith('/edit/media-library/upload'):
                         import tempfile
                         from urllib.parse import unquote
@@ -1229,7 +1276,7 @@ def make_server(app, port=8765):
                             temporary.unlink(missing_ok=True)
                         self.send_body(200, json.dumps(result, ensure_ascii=False).encode('utf-8'))
                         return
-                    max_len = 150_000_000 if ('/video' in path or '/upload' in path or path.endswith('/edit/audio')) else 25_000_000
+                    max_len = 150_000_000 if ('/video' in path or '/upload' in path or path.endswith(('/edit/audio', '/edit/foreground-pair'))) else 25_000_000
                     if length > max_len or length < 0:
                         raise DomainError('Недопустимый размер запроса.', 413)
                     if length > 0:

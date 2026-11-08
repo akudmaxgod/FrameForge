@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from imagegen.flow_prompt_budget import BASE_BUDGET, pack, units
+from imagegen.flow_prompt_budget import BASE_BUDGET, PEOPLE_COMPACT, pack, units
 from imagegen.visual_style import GRITTY_FLOW_STYLE
 
 
@@ -34,3 +34,11 @@ class FlowPromptBudgetTests(unittest.TestCase):
         source = "Exact source. " * 400
         self.assertEqual(pack(source), source)
         self.assertGreater(units(pack(source)), BASE_BUDGET)
+
+    def test_forced_layer_packing_preserves_already_packed_editorial_values(self):
+        marker = '\nRENDER CONSTRAINTS (never image lettering):'
+        constraints = json.dumps({'direction': PEOPLE_COMPACT, 'participants':['named actor']})
+        source = PEOPLE_COMPACT + marker + constraints
+        packed = pack(source, budget=0)
+        self.assertLess(units(packed), units(source))
+        self.assertEqual(packed.split(marker)[1], constraints)

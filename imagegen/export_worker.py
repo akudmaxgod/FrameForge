@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from fractions import Fraction
 from pathlib import Path
 try:
@@ -66,7 +67,9 @@ class VideoReader:
         frame = self.previous or self.next
         if frame is None:
             raise ValueError('Не удалось декодировать видеоклип.')
-        source = frame.to_image().convert('RGB')
+        source = frame.to_image()
+        if source.size == size:
+            return source
         if fill:
             return ImageOps.fit(source, size, Image.Resampling.BICUBIC)
         image = ImageOps.contain(source, size, Image.Resampling.BICUBIC)
@@ -146,31 +149,49 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
             if audio:
                 audio.layout='stereo'
                 audio.bit_rate=192000
+            black = Image.new('RGB', size, 'black')
+            white = Image.new('RGB', size, 'white')
+            clips = timeline['clips']
+            active = []
+            next_clip = 0
             for index in range(frames):
                 if cancelled():
                     raise InterruptedError('Экспорт отменён.')
                 time_ms=index*1000/24
-                active=[c for c in timeline['clips'] if c['start_ms']<=time_ms<c['end_ms']]
+                active = [c for c in active if time_ms < c['end_ms']]
+                while next_clip < len(clips) and clips[next_clip]['start_ms'] <= time_ms:
+                    clip = clips[next_clip]
+                    if time_ms < clip['end_ms']:
+                        active.append(clip)
+                    next_clip += 1
                 active_ids={c['edit_clip_id'] for c in active}
                 for cid in list(videos):
                     if cid not in active_ids:
                         videos.pop(cid).close()
-                canvas=Image.new('RGB',size,'black')
+                canvas = black
                 for c in active:
                     cid=c['edit_clip_id']
                     seconds=(c['trim_in_ms']+(time_ms-c['start_ms'])*c.get('playback_rate',1))/1000
                     if cid not in videos:
                         if c.get('media_type')=='image':
-                            from .montage_media import StillReader
-                            videos[cid]=StillReader(path(c['source_image_asset_id']),c)
+                            if c.get('foreground_effect'):
+                                from .montage_foreground import ForegroundReader
+                                videos[cid] = ForegroundReader(path(c['source_image_asset_id']), c, path)
+                            else:
+                                from .montage_media import StillReader
+                                videos[cid] = StillReader(path(c['source_image_asset_id']), c)
                         else:videos[cid]=VideoReader(path(c['source_video_asset_id']),seconds)
                     if c.get('media_type')!='image':seconds=min(seconds,max(c['trim_in_ms']/1000,c['trim_out_ms']/1000-.001))
                     image=videos[cid].image(seconds,size,fill=c.get('framing')=='fill')
                     fade=white_fade(c,time_ms)
-                    if fade:image=Image.blend(image,Image.new('RGB',size,'white'),fade)
+                    if fade:image=Image.blend(image,white,fade)
                     if c.get('illustrative'):
-                        image=illustrative_label(image)
-                    canvas=Image.blend(canvas,image,opacity(c,time_ms))
+                        image=illustrative_label(image.copy())
+                    alpha = opacity(c, time_ms)
+                    if alpha >= 1:
+                        canvas = image
+                    elif alpha > 0:
+                        canvas = Image.blend(canvas, image, alpha)
                 frame=av.VideoFrame.from_image(canvas)
                 frame.pts=index
                 frame.time_base=Fraction(1,24)
@@ -303,14 +324,24 @@ class ExportWorker:
         directory.mkdir(parents=True,exist_ok=True)
         temporary=directory/(job_id+'.partial.mp4')
         final=directory/(job_id+'.mp4')
-        def cancelled():
-            return bool(self.db.one('SELECT cancel_requested FROM edit_exports WHERE id=?',(job_id,))['cancel_requested'])
+        next_cancel_check = 0.0
+        cancel_requested = False
+        def cancelled(force=False):
+            nonlocal next_cancel_check, cancel_requested
+            if cancel_requested:
+                return True
+            current_time = time.monotonic()
+            if force or current_time >= next_cancel_check:
+                cancel_requested = bool(self.db.one(
+                    'SELECT cancel_requested FROM edit_exports WHERE id=?', (job_id,))['cancel_requested'])
+                next_cancel_check = current_time + 0.2
+            return cancel_requested
         def progress(percent,stage):
             with self.db.transaction() as conn:
                 conn.execute('UPDATE edit_exports SET progress=?,stage=?,updated_at=? WHERE id=?',(percent,stage,now(),job_id))
         try:
             with self.slot:
-                if cancelled():
+                if cancelled(force=True):
                     raise InterruptedError()
                 with self.db.transaction() as conn:
                     conn.execute("UPDATE edit_exports SET status='running' WHERE id=?",(job_id,))
@@ -318,7 +349,7 @@ class ExportWorker:
                 settings=document['export_settings']
                 size=(settings['width'],settings['height'])
                 render(self.service,document,temporary,progress,cancelled,size=size)
-                if cancelled():
+                if cancelled(force=True):
                     raise InterruptedError()
                 digest=hashlib.sha256()
                 with temporary.open('rb') as source:

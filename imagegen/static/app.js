@@ -513,6 +513,7 @@ async function api(path,data,retried=false){
   return result;
 }
 async function refreshFlowBridgeStatus(){
+  const previous=flowBridgeStatus;
   try{flowBridgeStatus=await api('/bridge/v1/status');}
   catch(error){flowBridgeStatus={connected:false,status:error.message};}
   const label=document.querySelector('#flow-bridge-status');
@@ -523,6 +524,9 @@ async function refreshFlowBridgeStatus(){
       ? `● Мост подключён${flowBridgeStatus.running?' · генерирует':''}${status?' · '+status:''}`
       : flowBridgeStatus.connected?'● Мост открыт для другого проекта ФФ':'○ Мост не подключён. Откройте инструмент Flow.';
   }
+  if(flowBridgeStatus?.connected&&flowBridgeStatus.project_id===project?.id&&project?.id===montageView?.projectId
+      &&String(flowBridgeStatus.status||'').startsWith('Слои Flow готовы')
+      &&(previous?.running||previous?.status!==flowBridgeStatus.status))void montageView.updateProject(project);
   updateAnimationCompletion();renderAnimationBudget();
 }
 async function refresh(force=false){
@@ -612,6 +616,11 @@ function resetDraft(){current=null;project=null;view='studio';selectedSubject=nu
 
 function render(){rememberAnimationDisclosures();updateAnimationCompletion();renderAnimationBudget();document.querySelectorAll('.step').forEach(item=>item.classList.toggle('active',item.dataset.view===view));if(view==='export'&&project&&montageProjectId===project.id){montageView?.updateProject(project);return;}montageRenderId++;montageView?.dispose();montageView=null;montageProjectId=null;renderControls();stopScenePreviews();main.replaceChildren();if(!project){renderWelcome();return;}if(view==='queue')renderOperationProgress();if(view==='queue')renderQueue();else if(view==='export')renderExport();else renderStudio();}
 
+const flowComposition=pid=>{
+  const saved=pid&&project?.id===pid?project.flow_composition:null;
+  return saved||(getSavedItem('frameforge-flow-composition:'+(pid||'draft'),'standard')==='foreground'?'foreground':'standard');
+};
+const draftLayerSource=()=>getSavedItem('frameforge-flow-layer-source','from_still')==='direct'?'direct':'from_still';
 function renderControls(){controls.replaceChildren();const locked=Boolean(project);const textBackendLabel='DeepSeek Flash';
  const backendBox=el('section',undefined,'control-section');backendBox.append(sectionLabel('Движок генерации'));
  const switcher=el('div',undefined,'mode-grid');
@@ -649,6 +658,7 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
 
     const bridgeStatus=el('div','○ Проверка связи с Flow...','muted');
     bridgeStatus.id='flow-bridge-status';
+    bridgeStatus.setAttribute('role','status');
     bridgeStatus.style.cssText='font-size:12px;line-height:1.45';
     if(flowBridgeStatus){
       const sameProject=flowBridgeStatus.connected&&flowBridgeStatus.project_id===current;
@@ -679,8 +689,11 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
     },'small-button','flow-bridge-open');
     const startFlowBtn=button('▶ Запустить генерацию в Flow',async()=>{
       if(!current)throw Error('Сначала откройте проект ФФ.');
-      await api('/bridge/v1/command',{action:'start',project_id:current});
-      showNotice('Команда отправлена в Flow. Генерация начинается в открытом инструменте.');
+      const foregroundPairs=flowComposition(current)==='foreground';
+      if(foregroundPairs&&montageView?.projectId===current)await montageView.prepareMaintenance();
+      await api('/bridge/v1/command',{action:'start',project_id:current,...(foregroundPairs?{foreground_pairs:true}:{})});
+      showNotice(project?.flow_layer_source==='direct'?'Flow готовит чистый фон и передний слой каждой сцены.'
+        :foregroundPairs?'Flow подготовит кадры, затем два изображения на сцену. Передний план будет плавно двигаться целиком.':'Команда отправлена в Flow. Генерация начинается в открытом инструменте.');
       await refreshFlowBridgeStatus();
     },'small-button','flow-bridge-start');
     const pauseFlowBtn=button('⏸ Пауза после кадра',async()=>{
@@ -757,6 +770,31 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
   const cameraTabs=el('div',undefined,'camera-tabs');cameraTabs.setAttribute('role','radiogroup');cameraTabs.setAttribute('aria-label','Камера');
   for(const item of CAMERA_MODES){const choice=button('',()=>{if(!locked){selectedCameraMode=item.id;saveItem(STORAGE_KEYS.cameraMode,selectedCameraMode);render();}},'camera-tab'+(cameraId===item.id?' selected':''),`camera-${item.id}`);choice.disabled=locked;choice.setAttribute('role','radio');choice.setAttribute('aria-checked',String(cameraId===item.id));choice.append(el('span',item.icon),el('small',item.name));cameraTabs.append(choice);}
   cameraBox.append(cameraTabs);if(cameraId==='custom'){const field=el('textarea');field.maxLength=1000;field.placeholder='Опишите планы и ракурсы камеры…';field.value=locked?(project.camera_custom||''):selectedCameraCustom;field.readOnly=locked;field.setAttribute('aria-label','Своя камера');field.addEventListener('input',()=>{selectedCameraCustom=field.value;if(!locked){saveItem(STORAGE_KEYS.cameraCustom,selectedCameraCustom);}});cameraBox.append(field);}controls.append(cameraBox);
+  const composition=el('section',undefined,'control-section');
+  composition.append(sectionLabel('Движение в сценах'));
+  const compositionChoice=selectOptions([['standard','Обычные кадры'],['foreground','Живой передний план · 2 слоя']],
+    flowComposition(project?.id),'flow-composition','Движение в сценах');
+  compositionChoice.style.width='100%';
+  compositionChoice.disabled=Boolean(project?.flow_composition);
+  const layerOptions=el('div',undefined,'mode-description');
+  const layerChoice=selectOptions([['from_still','Разделять готовый кадр'],['direct','Генерировать сразу слоями']],
+    project?.flow_layer_source||draftLayerSource(),'flow-layer-source','Как получить два слоя');
+  layerChoice.disabled=Boolean(project);
+  layerChoice.style.width='100%';
+  layerOptions.append(el('label','Как получить два слоя'),layerChoice);
+  layerChoice.onchange=()=>{saveItem('frameforge-flow-layer-source',layerChoice.value);updateComposition();};
+  const compositionHelp=el('p',undefined,'mode-description');
+  const updateComposition=()=>{
+    const timing=!project?'Выберите режим до разбора сценария. ':project.flow_composition?'Режим сохранён в проекте. ':'';
+    const layered=compositionChoice.value==='foreground';
+    layerOptions.hidden=!layered;
+    compositionHelp.textContent=timing+(layered
+      ?layerChoice.value==='direct'?'Flow создаёт чистый фон, затем передний слой. FrameForge собирает их и двигает переднюю сцену целиком.'
+      :'Flow готовит слои из кадра. Вся ближняя сцена движется, дальняя остаётся неподвижной.'
+      :'Flow генерирует цельные изображения по раскадровке.');
+  };
+  compositionChoice.onchange=()=>{saveItem('frameforge-flow-composition:'+(project?.id||'draft'),compositionChoice.value);updateComposition();const launch=document.querySelector('[data-testid="generate-scenes"]');if(launch&&['▶ Сгенерировать все сцены во Flow','▶ Сгенерировать сцены с параллаксом'].includes(launch.textContent))launch.textContent=compositionChoice.value==='foreground'?'▶ Сгенерировать сцены с параллаксом':'▶ Сгенерировать все сцены во Flow';};
+  updateComposition();composition.append(compositionChoice,layerOptions,compositionHelp);controls.append(composition);
 
   if(project){
     const reviewBox=el('section',undefined,'control-section');
@@ -777,7 +815,7 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
 function imagePath(src,alt){const img=el('img');img.src=src;img.alt=alt;return img;}
 function analysisActive(){return project?.generations.some(g=>g.purpose==='analysis'&&isActiveGeneration(g));}
 async function handleGenerateClick(){await createAndAnalyse();}
-async function createAndAnalyse(){if(!draftStory.trim())throw Error('Добавьте текст сценария.');if(voiceDraft.file){const capability=await api('/voice/capability');if(!capability.ready)throw Error(capability.message);}const preset=STYLE_PRESETS.find(item=>item.id===selectedPreset);const created=await api('/projects',{title:titleFromStory(draftStory),idea:'',story:draftStory,style:preset.prompt,mode:selectedMode,camera_mode:selectedCameraMode,camera_pacing:selectedCameraPacing,camera_custom:selectedCameraCustom,aspect_ratio:selectedAspectRatio,channel_profile_id:selectedChannelId||undefined});current=created.id;project=created;if(voiceDraft.file){showNotice('Загружаю озвучку…');await startVoiceProject(api,current);}else await api(`/projects/${current}/analyse`,{target:clampSceneCount(draftTarget)});await listProjects();await refresh(true);showNotice('Проект создан. Обработка выполняется в FrameForge.');}
+async function createAndAnalyse(){if(!draftStory.trim())throw Error('Добавьте текст сценария.');if(voiceDraft.file){const capability=await api('/voice/capability');if(!capability.ready)throw Error(capability.message);}const preset=STYLE_PRESETS.find(item=>item.id===selectedPreset);const composition=flowComposition(null);const created=await api('/projects',{title:titleFromStory(draftStory),idea:'',story:draftStory,style:preset.prompt,mode:selectedMode,camera_mode:selectedCameraMode,camera_pacing:selectedCameraPacing,camera_custom:selectedCameraCustom,aspect_ratio:selectedAspectRatio,flow_composition:composition,flow_layer_source:composition==='foreground'?draftLayerSource():'from_still',channel_profile_id:selectedChannelId||undefined});current=created.id;project=created;if(voiceDraft.file){showNotice('Загружаю озвучку…');await startVoiceProject(api,current);}else await api(`/projects/${current}/analyse`,{target:clampSceneCount(draftTarget)});await listProjects();await refresh(true);showNotice('Проект создан. Обработка выполняется в FrameForge.');}
 
 function renderWelcome(){const empty=el('section',undefined,'empty-state'),inner=el('div');inner.append(el('div','✦','orb'),el('h1','Создайте раскадровку'),el('p','Разберите сценарий автоматически или загрузите готовые промпты для сцен.','muted'),button('Импортировать промпты TXT / JSON',()=>openPromptImport({dialog,api,notice:showNotice,onCreated:async created=>{current=created.id;project=created;view='studio';history.replaceState(null,'',`?project=${created.id}`);await listProjects();render();}}),'primary','import-prompts'));empty.append(inner);main.append(empty);}
 function renderHead(subtitle){
@@ -1503,6 +1541,10 @@ async function startAllScenes(){
       await refresh(true);sameProject();
       const {missing,ready}=flowPortraitPlan();
       const stage=missing.length?'portraits':'scenes';
+      const foregroundPairs=stage==='scenes'&&flowComposition(pid)==='foreground';
+      if(foregroundPairs&&project.flow_layer_source==='direct'&&!bridge.foreground_direct)
+        throw Error('Обновите FrameForge Flow Bridge до 0.1.93 и перезагрузите вкладку Flow.');
+      if(foregroundPairs&&!bridge.foreground_pairs)throw Error('Обновите FrameForge Flow Bridge до 0.1.92 и перезагрузите вкладку Flow.');
       if(stage==='scenes'){
         const reason=sceneBatchBlockReason({allowMissingReferences:true});if(reason)throw Error(reason);
         if(ready.length){
@@ -1516,7 +1558,7 @@ async function startAllScenes(){
           await refresh(true);sameProject();
         }
       }
-      const command=await api('/bridge/v1/command',{action:'start',project_id:pid,images_only:true,batch_stage:stage});
+      const command=await api('/bridge/v1/command',{action:'start',project_id:pid,images_only:true,batch_stage:stage,...(foregroundPairs?{foreground_pairs:true}:{})});
       showNotice(stage==='portraits'?'Flow: запускаю недостающие портреты…':'Flow: запускаю сцены…');
       const status=await waitForFlowSceneCommand(pid,command.command_id);
       if(status.running||status.active_image_requests>0)
@@ -1524,6 +1566,8 @@ async function startAllScenes(){
           ? `Flow начал подготовку портретов: ${missing.length}. После проверки нажмите эту кнопку снова.`
           : `Flow подтвердил запуск изображений: ${count} кадров в плане.`);
       else if(stage==='portraits'&&status.status?.startsWith('Портреты готовы к проверке'))
+        showNotice(status.status);
+      else if(foregroundPairs&&status.status?.startsWith('Слои Flow готовы'))
         showNotice(status.status);
       else if(status.status)
         throw Error(`Flow принял команду и остановился: ${status.status}`);
@@ -1588,7 +1632,7 @@ function renderBatchActionBar(){
   let generateBtnText = 'Сгенерировать все кадры';
   if(portraits?.missing.length)generateBtnText='▶ Сгенерировать портреты во Flow';
   else if(portraits?.ready.length)generateBtnText='✓ Подтвердить портреты и запустить сцены';
-  else if(isFlow)generateBtnText='▶ Сгенерировать все сцены во Flow';
+  else if(isFlow)generateBtnText=flowComposition(project.id)==='foreground'?'▶ Сгенерировать сцены с параллаксом':'▶ Сгенерировать все сцены во Flow';
   const generateBtn = button(generateBtnText, startAllScenes, 'primary batch-generate-btn', 'generate-scenes');
   generateBtn.disabled=sceneBatchStarting;
   right.append(generateBtn);
@@ -2214,7 +2258,9 @@ function editScene(scene){
   const shotField=field('Ракурс и тип кадра (shot)', data.shot||'', 'input');
   shotField.box.style.marginBottom='10px';
 
-  const promptField=field('Ручной промпт (переопределяет автосоставление, если не пусто)', data.manual_prompt||'', 'textarea');
+  const layered=project.flow_composition==='foreground';
+  const promptField=field(layered?'Дополнительный промпт для двух слоёв':'Ручной промпт (переопределяет автосоставление, если не пусто)', data.manual_prompt||'', 'textarea');
+  if(layered)promptField.input.placeholder='Например: ближний слой — герой, рука и меч целиком; дальний слой — арка и горы. Контур меча на фоне светлого неба.';
   promptField.box.style.marginBottom='14px';
 
   // Characters selector

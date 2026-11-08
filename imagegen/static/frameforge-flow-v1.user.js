@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name FrameForge Flow Bridge (new)
 // @namespace frameforge.local.bridge
-// @version 0.1.89
+// @version 0.1.93
 // @match https://flow.google.com/project/*
 // @match https://flow.google.com/u/*/project/*
 // @grant GM_xmlhttpRequest
@@ -134,10 +134,10 @@
  // broken bridge does not spin forever.
  const isRejectedComposition=error=>!/Смысловая проверка|Лимит Gemini/i.test(String(error?.message||error))&&/кадр не принят|недостаточно похож|лицо в кадре|несколько сцен|несколько панел|нет всех персонажей|количество людей|больше рук|субтитр|облачко|диалогов|текст|надпис|анатом|животн|split screen|diptych|triptych|collage|contact sheet|поля|рамк|паспарту|letterbox|pillarbox|холст 16:9|встроенные поля/i.test(String(error?.message||error));
  tell('Ожидание инструмента Flow с адаптером v1');
- function api(method,path,data) {
+ function api(method,path,data,token=null) {
   const route=path.split('?')[0];
   const manifestRead=method==='GET' && route.endsWith('/prompts');
-  const resultUpload=method==='POST' && /\/(?:image|upload|video)$/.test(route);
+  const resultUpload=method==='POST' && /\/(?:image|upload|video|flow-layers)$/.test(route);
   const timeout=manifestRead ? 180000 : resultUpload ? 90000 : 30000;
   const timeoutMessage=manifestRead
     ? 'Таймаут ФФ при подготовке промптов. Повторите запуск после восстановления связи.'
@@ -145,8 +145,8 @@
       ? 'Таймаут сохранения в ФФ: результат сохранён в мосте. При продолжении сначала повторится его сохранение.'
       : 'Таймаут ответа ФФ. Проверьте связь и повторите действие.';
   return new Promise((resolve,reject)=>GM_xmlhttpRequest({method,url:'http://127.0.0.1:8765'+path,
-   headers:{'Content-Type':'application/json','X-Client':'google-flow'},data:data===undefined?undefined:JSON.stringify(data),timeout,
-   onload:r=>{try{const value=JSON.parse(r.responseText);if(r.status<200||r.status>=300){const error=Error(value.error||`HTTP ${r.status}`);error.code=value.code;error.retry=value.retry;throw error;}resolve(value);}catch(e){reject(e);}},
+   headers:{'Content-Type':'application/json','X-Client':'google-flow',...(token?{'X-Session-Token':token}:{})},data:data===undefined?undefined:JSON.stringify(data),timeout,
+   onload:r=>{try{const value=JSON.parse(r.responseText);if(r.status<200||r.status>=300){const error=Error(value.error||`HTTP ${r.status}`);error.status=r.status;error.code=value.code;error.retry=value.retry;throw error;}resolve(value);}catch(e){reject(e);}},
    onerror:()=>reject(Error('ФФ недоступен')),ontimeout:()=>reject(Error(timeoutMessage))
   }));
  }
@@ -529,7 +529,7 @@
     else reject(Error('Flow не ответил за 4 минуты. Проверьте результат в Flow.'));
    },timeoutMs);
    pending.set(job.requestId,{id:job.requestId,resolve,reject,timer,owner,timedOut:false,type,jobKind:job.kind});
-   if(type==='generate')tell(`ФФ: запросов Flow в работе ${pending.size} / ${adapterImageConcurrency}; кадр ${job.position||job.id||''}`);
+   if(type==='generate'&&job.kind!=='foreground_layer')tell(`ФФ: запросов Flow в работе ${pending.size} / ${adapterImageConcurrency}; кадр ${job.position||job.id||''}`);
    try {
     if(['generate','scene_video'].includes(type)&&owner?.job?.requestId===job.requestId){owner.job.submissionPhase='dispatching';save();}
     peer.postMessage({channel:CHANNEL,type,...job},peerOrigin);
@@ -1245,7 +1245,178 @@
    }
  }
 
- async function run(sceneIds=null,generationIds=null,imagesOnly=false,batchStage=null,expectedProjectId=null,animationsOnly=false) {
+ async function processForegroundLayers(options) {
+  const {projectId,expectedRevision,state,save,tell,api,generate,isPaused=()=>false,direct=false,
+         loadImage=loadSourceImageDataUrl,newId=()=>crypto.randomUUID(),importReference=(...args)=>ensureReferenceMediaId(...args),
+         makeComposite=(...args)=>createClientCompositeReference(...args),
+         wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}=options;
+  const path=`/api/projects/${projectId}/edit/flow-layers`;
+  const tasks=state.foregroundTasks||(state.foregroundTasks={});
+  const failed=new Map(),refs=new Map(),plates=new Map(),rejections=[];
+  const keyOf=job=>`${job.direct?job.scene_id:job.source}:${job.scene_revision}:${job.role}`;
+  const ticketKey=job=>`${job.scene_id}:${job.scene_revision}`;
+  const tickets=direct?(state.directLayerTickets??={}):{};
+  let token=null;
+  const post=async body=>{
+   if(!token)token=(await api('GET','/api/session')).token;
+   try{return await api('POST',path,body,token);}
+   catch(error){
+    if(error.status!==403)throw error;
+    token=(await api('GET','/api/session')).token;
+    return api('POST',path,body,token);
+   }
+  };
+  const ensureProject=async()=>{
+   if((await api('GET','/api/projects/current')).project_id!==projectId)
+    throw Error('Активный проект изменился. Сохранённые слои останутся в исходном проекте.');
+  };
+  const release=async job=>{
+   if(!job.admission_request_id)return;
+   await api('POST','/api/bridge/v1/admission/failure',{scene_id:job.scene_id,
+    request_id:job.admission_request_id,code:'COMPOSITION_REJECTED'});
+   delete tickets[ticketKey(job)];save();
+  };
+  const admit=async item=>{
+   if(!item.admission_prompt)return null;
+   const key=ticketKey(item),requestId=tickets[key]||(tickets[key]=newId());
+   save();
+   const deadline=Date.now()+60000;
+   while(!isPaused()){
+    const slot=await api('POST','/api/bridge/v1/admission',{scene_id:item.scene_id,request_id:requestId,
+     revision:item.scene_revision,prompt:item.admission_prompt});
+    if(slot.allowed)return requestId;
+    if(['uploaded','rejected','failed','superseded'].includes(slot.state)){
+     delete tickets[key];save();
+     throw Error('Предыдущая попытка завершена. Запустите слои ещё раз.');
+    }
+    if(Date.now()>=deadline||['fail','uncertain','needs_resolution','error_response','error_access','error_request','transport_unknown','blocked_preflight'].includes(slot.state))
+     throw Error(slot.reason||'Не получено разрешение Flow.');
+    tell(slot.reason||'Ожидается проверка сцены…');
+    await wait(2500);
+   }
+   return null;
+  };
+  const saveLayer=async (key,task)=>{
+   const {job,result}=task;
+   const {source,role,scene_id,scene_revision,position}=job;
+   tell(`Слои Flow · кадр ${position}: проверяю ${role==='background'?'чистый фон':'передний план'}…`);
+   try{
+    if(!result?.base64){
+     failed.set(scene_id,position);
+     if(job.direct)await release(job);
+    }else{
+     const saved=await post({action:'save',source,role,scene_id,scene_revision,image:result.base64,
+      ...(job.direct?{admission_request_id:job.admission_request_id}:{})});
+     if(job.direct&&role==='background')plates.set(ticketKey(job),saved);
+     if(job.direct&&role==='foreground')delete tickets[ticketKey(job)];
+    }
+   }catch(error){
+    if(![400,404,409,413,415,422].includes(error.status))throw error;
+    failed.set(scene_id,position);
+    rejections.push(`кадр ${position}: ${error.message}`);
+    if(job.direct)await release(job);
+   }
+   delete tasks[key];save();
+  };
+  // Save known results first. An uncertain paid request is never resent.
+  for(const [key,task] of Object.entries(tasks)){
+   const {job}=task;
+   if(job.role==='motion'){delete tasks[key];save();continue;}
+   if(Boolean(job.direct)!==direct)continue;
+   if(task.result)await saveLayer(key,task);
+   else if(job.remoteFailure||['prepared','not_sent'].includes(job.submissionPhase)){delete tasks[key];save();}
+   else failed.set(job.scene_id,job.position);
+  }
+  if(isPaused())return null;
+  const {jobs,blocked=[]}=await api('GET',path);
+  for(const item of blocked){
+   if(failed.has(item.scene_id))continue;
+   failed.set(item.scene_id,item.position);
+   rejections.push(`кадр ${item.position}: ${item.reason}`);
+  }
+  for(const [index,planned] of jobs.entries()){
+   if(isPaused())return null;
+   const item={...planned};
+   if(failed.has(item.scene_id))continue;
+   if(direct&&item.role==='foreground'&&!item.source){
+    const plate=plates.get(ticketKey(item));
+    if(!plate?.source){failed.set(item.scene_id,item.position);rejections.push(`кадр ${item.position}: чистый фон недоступен`);continue;}
+    Object.assign(item,{source:plate.source,image_url:plate.image_url,source_sha256:plate.source_sha256});
+   }
+   await ensureProject();
+   const key=keyOf(item),refKey=`${item.source}:${item.scene_revision}`;
+   const sceneKey='scenes:'+item.scene_id;
+   let mediaId=refs.get(refKey)||(state.refAssets?.[sceneKey]===item.source?state.refs?.[sceneKey]:null);
+   if(item.source&&(typeof mediaId!=='string'||!mediaId||mediaId.startsWith('imported_'))){
+    tell(`Слои Flow · кадр ${item.position}: загружаю исходник…`);
+    const sourceData=await loadImage(item.image_url,item.source_sha256);
+    const imported=await generate({requestId:newId(),scene_id:item.scene_id,scene_revision:item.scene_revision,
+     source_image_asset_id:item.source,source_image_sha256:item.source_sha256,imageDataUrl:sourceData,
+     sourceImageDataUrl:sourceData},'import_source_image',null);
+    if(imported?.source_image_asset_id!==item.source||imported?.source_image_sha256!==item.source_sha256||
+       typeof imported?.mediaId!=='string'||!imported.mediaId||imported.mediaId.startsWith('imported_')){
+     failed.set(item.scene_id,item.position);continue;
+    }
+    mediaId=imported.mediaId;refs.set(refKey,mediaId);
+   }
+   const referenceImageMediaIds=item.source?[mediaId]:[];
+   const requestedRefs=item.references||[];
+   try{
+    if(requestedRefs.length+referenceImageMediaIds.length>2){
+     const composite=await makeComposite(item,requestedRefs.map(ref=>({ref})));
+     if(!composite?.data_url||composite.count!==requestedRefs.length)throw Error('Не удалось собрать все референсы слоя.');
+     const asset=`layer-references:${composite.sha256}`;
+     let id=refs.get(asset);
+     if(!id){
+      const imported=await generate({requestId:newId(),scene_id:item.scene_id,scene_revision:item.scene_revision,
+       source_image_asset_id:asset,imageDataUrl:composite.data_url,sourceImageDataUrl:composite.data_url},'import_source_image',null);
+      if(!imported?.mediaId)throw Error('Flow не принял лист референсов слоя.');
+      id=imported.mediaId;refs.set(asset,id);
+     }
+     item.prompt+='\nA labeled reference sheet defines identity only. Output a single layer.';
+     if(item.prompt.length>4000)throw Error('Промпт с листом референсов превышает предел Flow.');
+     referenceImageMediaIds.push(id);
+    }else for(const ref of requestedRefs){
+     const refId=await importReference(ref,item.position);
+     if(!refId)throw Error(`Не удалось загрузить референс ${ref.name||''}.`);
+     referenceImageMediaIds.push(refId);
+    }
+   }catch(error){
+    failed.set(item.scene_id,item.position);rejections.push(`кадр ${item.position}: ${error.message}`);
+    if(direct&&tickets[ticketKey(item)])await release({...item,admission_request_id:tickets[ticketKey(item)]});
+    continue;
+   }
+   if(isPaused())return null;
+   await ensureProject();
+   let ticket=null;
+   if(direct){
+    try{ticket=await admit(item);}
+    catch(error){failed.set(item.scene_id,item.position);rejections.push(`кадр ${item.position}: ${error.message}`);continue;}
+    if(isPaused())return null;
+   }
+   const job={...item,requestId:newId(),kind:'foreground_layer',id:item.scene_id,referenceImageMediaIds,
+    ...(direct?{admission_request_id:ticket}:{}),
+    aspectRatio:item.aspect_ratio,modelDisplayName:state.flowImageModel,submissionPhase:'prepared'};
+   const task=tasks[key]={job,result:null};save();
+   tell(`Слои Flow · ${index+1}/${jobs.length} · кадр ${item.position}: ${item.role==='background'?'чистый фон':direct?'генерирую переднюю сцену':'выделяю переднюю сцену'}…`);
+   try{task.result=await generate(job,'generate',task);save();}
+   catch(error){
+    if(!job.remoteFailure&&!confirmedRemoteFailure(error)&&
+       !['prepared','not_sent'].includes(job.submissionPhase))
+     throw Error(`Кадр ${item.position}: ${error.message} Запрос не будет отправлен повторно. Нажмите «Запустить генерацию в Flow», чтобы продолжить с остальных кадров.`);
+    if(direct)await release(job);
+    failed.set(item.scene_id,item.position);delete tasks[key];save();continue;
+   }
+   await saveLayer(key,task);
+  }
+  if(isPaused())return null;
+  await ensureProject();
+  const result=await post({action:'finish',expected_revision:expectedRevision});
+  return {...result,failed:[...failed.values()],rejections};
+ }
+
+
+ async function run(sceneIds=null,generationIds=null,imagesOnly=false,batchStage=null,expectedProjectId=null,animationsOnly=false,foregroundPairs=false,directLayers=false) {
   if(running)return;
   if(!peer){tell('Откройте инструмент с адаптером v1');return;}
   running=true;pauseRequested=false;
@@ -1256,6 +1427,7 @@
    const {project_id}=await api('GET','/api/projects/current');
    if(!project_id)throw Error('В ФФ нет активного проекта');
    if(expectedProjectId && project_id!==expectedProjectId)throw Error('Активный проект ФФ изменился. Повторите запуск из нужного проекта.');
+   const montageRevision=foregroundPairs?(await api('GET',`/api/projects/${project_id}/edit`)).revision:null;
    const flowSettings=await api('GET','/api/settings');
    const flowProject=getFlowProjectId();
    if(!flowProject)throw Error('Откройте проект Google Flow для подключения моста.');
@@ -1313,7 +1485,7 @@
      tell('Кадр отклонён проверкой. Запрашиваю новый вариант вместо остановки очереди...');
     } else throw error;
    }
-    if(!animationsOnly)await processBridgeQueue({
+    if(!animationsOnly&&!directLayers)await processBridgeQueue({
       project_id,
       sceneIds,
       generationIds,
@@ -1333,6 +1505,10 @@
       imageConcurrency:adapterImageConcurrency,
       isPaused: () => pauseRequested
     });
+   let layerSummary=null;
+   if(!pauseRequested&&foregroundPairs)layerSummary=await processForegroundLayers({
+    projectId:project_id,expectedRevision:montageRevision,state,save,tell,api,generate,direct:directLayers,isPaused:()=>pauseRequested
+   });
    if(!pauseRequested&&!generationIds&&!imagesOnly&&!batchStage) {
     const animData=await api('GET',`/api/projects/${project_id}/animation/jobs`);
     const veoJobs=(animData.jobs||[]).filter(job=>(!sceneIds||sceneIds.includes(job.scene_id))&&!unresolvedVideos.some(t=>t.scene_id===job.scene_id));
@@ -1500,7 +1676,10 @@
     }
    }
    if(!pauseRequested){
-    if(unresolvedVideos.length)tell(`Остальные выбранные видео обработаны. Неподтверждённых попыток: ${unresolvedVideos.length} (кадры ${unresolvedVideos.map(t=>t.position||t.scene_id).join(', ')}). Их повтор не запускался; проверьте результаты в Flow.`);
+    if(layerSummary)tell(layerSummary.applied?
+     `Слои Flow готовы · сцен в монтаже: ${layerSummary.paired}.${layerSummary.failed.length?` Без пары слоёв: ${layerSummary.failed.join(', ')}.`:''}${layerSummary.rejections[0]?` ${layerSummary.rejections[0]}`:''}`:
+     layerSummary.reason);
+    else if(unresolvedVideos.length)tell(`Остальные выбранные видео обработаны. Неподтверждённых попыток: ${unresolvedVideos.length} (кадры ${unresolvedVideos.map(t=>t.position||t.scene_id).join(', ')}). Их повтор не запускался; проверьте результаты в Flow.`);
     else if(batchStage==='portraits')tell('Портреты готовы к проверке. Проверьте их в FrameForge и запустите сцены той же кнопкой.');
     else tell(generationIds?'Эталон сохранён. Мост подключён и ждёт следующую команду.':'Очередь завершена. Мост подключён и ждёт следующую команду.');
    }else{
@@ -1526,13 +1705,13 @@
    const response=await api('POST','/api/bridge/v1/heartbeat',{
     project_id,flow_project_id:flowProject,
     adapter_connected:Boolean(peer),running,status:status.textContent,ack_command_id:ackCommandId,
-    adapter_instance_id:adapterInstanceId,script_version:'0.1.89',scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
+    adapter_instance_id:adapterInstanceId,script_version:'0.1.93',foreground_parallax:true,foreground_direct:true,scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
    });
    const command=response.command;
    if(command&&command.id!==processedCommandId&&command.project_id===project_id
       && !(command.action==='start'&&running)){
     processedCommandId=command.id;ackCommandId=command.id;
-    if(command.action==='start')void run(Array.isArray(command.scene_ids)?command.scene_ids:null,Array.isArray(command.generation_ids)?command.generation_ids:null,command.images_only===true,command.batch_stage,command.project_id,command.animations_only===true);
+    if(command.action==='start')void run(Array.isArray(command.scene_ids)?command.scene_ids:null,Array.isArray(command.generation_ids)?command.generation_ids:null,command.images_only===true,command.batch_stage,command.project_id,command.animations_only===true,command.foreground_pairs===true,command.direct_layers===true);
     if(command.action==='pause'&&running){pauseRequested=true;tell('Пауза запрошена из ФФ: сохраняю текущий кадр');}
     if(command.action==='check'){
      tell('Проверяю и привязываю мост к выбранному проекту ФФ...');
@@ -1564,7 +1743,7 @@
  });
  pause.addEventListener('click',()=>{if(running){pauseRequested=true;tell('Пауза запрошена: сохраняю текущий кадр');}});
  reset.addEventListener('click',async()=>{
-  if(running||pending.size||state?.job||state?.result||state?.deferredImageWork||state?.deferredSceneWork||Object.values(state?.videoTasks||{}).some(task=>task.job||task.result)||Object.values(state?.sceneTasks||{}).some(task=>task.job||task.result)){tell('Есть незавершённые запросы. Сохраните результаты перед сбросом.');return;}
+  if(running||pending.size||state?.job||state?.result||state?.deferredImageWork||state?.deferredSceneWork||Object.values(state?.foregroundTasks||{}).some(task=>task.result)||Object.values(state?.videoTasks||{}).some(task=>task.job||task.result)||Object.values(state?.sceneTasks||{}).some(task=>task.job||task.result)){tell('Есть незавершённые запросы. Сохраните результаты перед сбросом.');return;}
   try{
    const {project_id}=await api('GET','/api/projects/current');
    const flowProject=getFlowProjectId();
@@ -1593,7 +1772,7 @@
       isolateCompletedSceneForPortrait,
       isRejectedComposition,
       formatStageError,
-      videoBridgeJob
+      videoBridgeJob,processForegroundLayers
     };
   }
   if (typeof module !== 'undefined' && module.exports) {
@@ -1613,7 +1792,7 @@
       isolateCompletedSceneForPortrait,
       isRejectedComposition,
       formatStageError,
-      videoBridgeJob
+      videoBridgeJob,processForegroundLayers
     };
   }
 

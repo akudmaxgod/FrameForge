@@ -28,7 +28,7 @@
    в этот локальный репозиторий. Не копируйте саму папку source ещё одним уровнем.
 4. Во вкладке Changes убедитесь, что нет `data`, `.env`, `settings.json`, ключей,
    `.venv`, `backends`, `models`, архивов и личных изображений.
-5. Сделайте **Commit to main** с описанием `Prepare FrameForge 0.2.0rc3`.
+5. Сделайте **Commit to main** с описанием `Prepare FrameForge 0.2.0rc4`.
 6. Если удалённый репозиторий уже создан в шаге 1: **Repository → Repository settings → Remote**
    и укажите его адрес `https://github.com/ВАШ-ЛОГИН/FrameForge.git`, затем Push.
    Если Desktop предлагает публикацию нового репозитория, обязательно оставьте
@@ -40,7 +40,7 @@
 git init -b main
 git add .
 git status --short
-git commit -m "Prepare FrameForge 0.2.0rc3"
+git commit -m "Prepare FrameForge 0.2.0rc4"
 git remote add origin https://github.com/ВАШ-ЛОГИН/FrameForge.git
 git push -u origin main
 ```
@@ -52,12 +52,12 @@ git push -u origin main
 ## 3. Выложить готовую программу в Releases
 
 1. В репозитории откройте **Releases → Draft a new release**.
-2. Tag: `v0.2.0rc3`, Target: `main` с загруженным кодом.
-3. Название: `FrameForge 0.2.0rc3 — закрытый тест`.
+2. Tag: `v0.2.0rc4`, Target: `main` с загруженным кодом.
+3. Название: `FrameForge 0.2.0rc4 — закрытый тест`.
 4. Вставьте раздел из `CHANGELOG.md` и ограничения из `docs/VALIDATION.md`.
 5. Прикрепите из папки **artifacts**:
-   - `FrameForge-0.2.0rc3-windows-x64.zip` — для пользователей;
-   - `FrameForge-0.2.0rc3-source.zip` — очищенная копия исходников;
+   - `FrameForge-0.2.0rc4-windows-x64.zip` — для пользователей;
+   - `FrameForge-0.2.0rc4-source.zip` — очищенная копия исходников;
    - `SHA256SUMS.txt` — контрольные суммы архивов.
 6. Включите **This is a pre-release** и нажмите **Save draft**, пока проверяется комплект файлов.
 7. Для выдачи кандидата участникам пилота нажмите **Publish release**. Это закрытый тест,

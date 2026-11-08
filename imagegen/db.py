@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS projects(
  id TEXT PRIMARY KEY, title TEXT NOT NULL, idea TEXT NOT NULL,
  story TEXT NOT NULL, style TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'characters', world TEXT NOT NULL DEFAULT '',
  camera_mode TEXT NOT NULL DEFAULT 'cinema', camera_pacing TEXT NOT NULL DEFAULT 'steady', aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+ flow_composition TEXT,
+ flow_layer_source TEXT NOT NULL DEFAULT 'from_still',
   cast_bible TEXT NOT NULL DEFAULT '{}', animation_settings TEXT NOT NULL DEFAULT '{}',
   analysis_metadata TEXT NOT NULL DEFAULT '{}',
  version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
@@ -437,6 +439,10 @@ class Database:
                 connection.execute("ALTER TABLE projects ADD COLUMN camera_pacing TEXT NOT NULL DEFAULT 'steady'")
             if 'aspect_ratio' not in columns:
                 connection.execute("ALTER TABLE projects ADD COLUMN aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
+            if 'flow_composition' not in columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN flow_composition TEXT")
+            if 'flow_layer_source' not in columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN flow_layer_source TEXT NOT NULL DEFAULT 'from_still'")
             if 'cast_bible' not in columns:
                 connection.execute("ALTER TABLE projects ADD COLUMN cast_bible TEXT NOT NULL DEFAULT '{}'")
             if 'animation_settings' not in columns:

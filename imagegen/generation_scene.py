@@ -231,12 +231,22 @@ def compile_wire(project, scene, references=()):
         else:
             lines.append('Attached references preserve the selected setting/identity; narration controls era, action and state. Do not import unrelated people or ruined state.')
     from .frame_composition import instruction as camera_instruction
-    from .camera_profiles import instruction as project_camera
+    from .camera_profiles import depth_instruction, instruction as project_camera
     framing = camera_instruction(scene, compact=True)
     if not framing and project.get('camera_mode') == 'panorama':
         framing = project_camera(project, scene)
     if framing:
         lines.append(framing)
+    depth = depth_instruction(project)
+    if depth:
+        lines.append(depth)
+        from .domain import layered_creature, nonhuman_scale_instruction
+        cast_ids = {reference.get('character_id') for reference in references if reference.get('character_id')}
+        names = set(scene.get('characters') or ())
+        creatures = [c for c in project.get('characters', []) if layered_creature(project, c)
+                     and (c.get('id') in cast_ids or c.get('name') in names)]
+        if creatures:
+            lines.append(nonhuman_scale_instruction(creatures, compact=True, project=project))
     if scene.get('manual_prompt'):
         lines.append('Additional requested framing: ' + scene['manual_prompt'])
     guards = ('In-world text is allowed only when the source explicitly calls for it. No overlays, subtitles, logos or panels. '

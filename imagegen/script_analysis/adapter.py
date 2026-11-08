@@ -333,4 +333,4 @@ def export_to_app_analysis(
     analysis['diagnostics']['warnings'] = list(analysis.get('warnings', []))
     analysis['diagnostics']['unresolved_warnings_count'] = len(analysis['diagnostics']['warnings'])
     from .storyboard import plan
-    return plan(analysis,story_text,kwargs.get('target'))
+    return plan(analysis,story_text,kwargs.get('target'),flow_composition=(project or {}).get('flow_composition'))

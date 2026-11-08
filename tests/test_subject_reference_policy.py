@@ -123,6 +123,33 @@ class SubjectPolicyTests(unittest.TestCase):
         enriched=enrich([c],{'ch_a':{'cast_id':'ch_a','entity_type':'animal','identity_scope':'generic'}})
         self.assertFalse(enriched[0]['portrait_required'])
 
+    def test_layered_preset_preserves_described_anatomy_and_manual_layer_staging(self):
+        from imagegen.domain import compile_prompt
+        from imagegen.service import Service
+
+        hero = character('Голлум (Смеагол)', 'Человекоподобный персонаж с худыми руками и большими глазами.',
+                         entity_type='creature')
+        hero.update(locked=True, references={'portrait': 'approved'}, revision=1)
+        standard = {'mode': 'dynamic', 'style': 'Cinematic', 'world': 'Middle-earth'}
+        layered = {**standard, 'flow_composition': 'foreground'}
+        data = {**scene([hero], 'Голлум сжимает кольцо.'), 'visible_people': 0,
+                'manual_prompt': 'Ближний слой — Голлум и кольцо. Дальний слой — каменные своды.'}
+        service = object.__new__(Service)
+        standard_cast = service.casting_snapshot(standard, hero, profile={'test': True})['prompt']
+        layered_cast = service.casting_snapshot(layered, hero, profile={'test': True})['prompt']
+        self.assertIn('no humanoid anatomy', standard_cast)
+        self.assertNotIn('no humanoid anatomy', layered_cast)
+        self.assertIn(hero['description'], layered_cast)
+        self.assertIn('No humanoid body', compile_flow_prompt(standard, data, [hero]))
+        flow_prompt = compile_flow_prompt(layered, data, [hero])
+        self.assertNotIn('No humanoid body', flow_prompt)
+        self.assertIn(hero['description'], flow_prompt)
+        self.assertIn(data['manual_prompt'], flow_prompt)
+        self.assertIn('CUT:', flow_prompt)
+        prompt, refs = compile_prompt(layered, data, [hero])
+        self.assertNotIn('No human face, body, hands', prompt)
+        self.assertEqual(refs[0]['asset_id'], 'approved')
+
     def test_crowd_remains_visible_without_an_invented_single_person(self):
         from imagegen.domain import people_count_unresolved
         c=character('Толпа зрителей','Толпа собралась у сцены.')

@@ -21,7 +21,7 @@ from .db import Database, uid, now, dump
 from .domain import (DomainError, required_text, validate_analysis, compile_prompt,
                      compile_flow_prompt, fingerprint, scene_mentions_people, scene_has_explicit_unbound_person, scene_anonymous_people_count, scene_over_shoulder_anonymous_people_count,
                      extract_scene_episodic_roles,
-                     character_requirements, prop_is_story, is_nonhuman_character,
+                     character_requirements, prop_is_story, is_nonhuman_character, layered_creature,
                      differentiate_character_visual_features,
                      resolve_scene_presence_contract,
                      validate_project_preflight, build_global_story_bible,
@@ -1043,6 +1043,12 @@ class Service:
         aspect_ratio = data.get('aspect_ratio', '16:9')
         if aspect_ratio not in ASPECT_RATIOS:
             aspect_ratio = '16:9'
+        flow_composition = data.get('flow_composition', 'standard')
+        if flow_composition not in ('standard', 'foreground'):
+            raise DomainError('Неизвестный режим движения сцены.')
+        layer_source = data.get('flow_layer_source', 'from_still')
+        if layer_source not in ('from_still', 'direct') or (layer_source == 'direct' and flow_composition != 'foreground'):
+            raise DomainError('Прямая генерация слоёв доступна в режиме «Живой передний план».')
 
         channel_profile_id = data.get('channel_profile_id')
         channel_version_id = None
@@ -1079,8 +1085,9 @@ class Service:
         project_id = uid()
         with self.db.transaction() as connection:
             connection.execute(
-                'INSERT INTO projects(id,title,idea,story,style,mode,camera_mode,camera_pacing,aspect_ratio,channel_profile_id,channel_profile_version_id,channel_character_version_map,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (project_id, title, idea, story, style, mode, camera_mode, camera_pacing, aspect_ratio, channel_profile_id, channel_version_id, dump(char_version_map), now())
+                'INSERT INTO projects(id,title,idea,story,style,mode,camera_mode,camera_pacing,aspect_ratio,flow_composition,flow_layer_source,channel_profile_id,channel_profile_version_id,channel_character_version_map,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (project_id, title, idea, story, style, mode, camera_mode, camera_pacing, aspect_ratio, flow_composition, layer_source,
+                 channel_profile_id, channel_version_id, dump(char_version_map), now())
             )
         self.update_camera_settings(project_id, {'camera_custom': data.get('camera_custom', '')})
         return self.project(project_id)
@@ -1469,6 +1476,16 @@ class Service:
                         if project['mode'] == 'objects' and not is_nonhuman_character(character) else
                         character_requirements(character['description'], character['name'], character['entity_type']))
         age, gender = requirements['age'], requirements['gender']
+        if layered_creature(project, character):
+            prompt = (f"SOLO CHARACTER REFERENCE. {character['name']}: {character['description']}. "
+                      "Preserve the specified identity, face, hands, body plan, proportions and wardrobe. "
+                      "Use the described features; add no animal traits or extra limbs. "
+                      "Show one complete figure in a three-quarter view against a plain neutral background. "
+                      "Clear silhouette, no scene, companions, lettering or panels. "
+                      f"Style: {project['style']}.")
+            return {'profile': profile, 'prompt': prompt, 'references': [], 'wardrobe_key': None,
+                    'character_description': character['description'], 'age_constraint': None, 'gender_constraint': None,
+                    'character_requirements': requirements, 'style': project['style']}
         if requirements.get('entity_type') == 'nonhuman':
             style = project['style']
             if is_gritty_style(style):
@@ -3540,8 +3557,11 @@ class Service:
                     state = 'completed' if all(s == 'succeeded' for s in states) else 'completed_with_errors'
                     connection.execute('UPDATE batches SET state=? WHERE id=?', (state, batch['id']))
 
-    def upload_scene_image(self, scene_id, image_bytes, image_validator=None, fidelity_candidate_id=None):
+    def upload_scene_image(self, scene_id, image_bytes, image_validator=None, fidelity_candidate_id=None, *,
+                           expected_revision=None, publish_layers=None):
         scene = self.scene(scene_id)
+        if expected_revision is not None and scene['current_revision'] != expected_revision:
+            raise DomainError('Сцена изменилась во время генерации слоёв.', 409)
         project_id = scene['project_id']
         processed_data = self._process_image_bytes(image_bytes, (1024, 576))
         new_sha256 = hashlib.sha256(processed_data).hexdigest()
@@ -3649,6 +3669,8 @@ class Service:
             ORDER BY g.created_at DESC LIMIT 1
         ''', (scene_id, scene['current_revision'], new_sha256))
         if existing_scene_gen:
+            if publish_layers:
+                raise DomainError('Такая сборка уже есть среди кадров этой сцены.', 409)
             pending_rows = self.db.all('''SELECT g.id FROM generations g
                 LEFT JOIN batches b ON b.id=g.batch_id
                 WHERE g.scene_id=? AND g.scene_revision=? AND g.state='queued'
@@ -3684,7 +3706,7 @@ class Service:
         pending = pending_rows[0] if pending_rows else None
         generation_id = pending['id'] if pending else uid()
         asset_id = uid()
-        relative = f"projects/{project_id}/{generation_id}.png"
+        relative = f"projects/{project_id}/{asset_id if publish_layers else generation_id}.png"
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(processed_data)
@@ -3703,9 +3725,17 @@ class Service:
         }
         metadata_dir = self.root / 'metadata'
         metadata_dir.mkdir(exist_ok=True)
-        (metadata_dir / f"{generation_id}.json").write_text(dump(metadata), encoding='utf-8')
+        metadata_path = metadata_dir / f"{generation_id}.json"
+        metadata_path.write_text(dump(metadata), encoding='utf-8')
 
         with self.db.transaction() as connection:
+            if publish_layers:
+                try:
+                    publish_layers(connection, asset_id)
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    metadata_path.unlink(missing_ok=True)
+                    raise
             progress = dump({'stage': 'Загружено из Google Flow', 'percent': 100})
             if pending_rows:
                 for prow in pending_rows:

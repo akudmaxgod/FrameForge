@@ -8,6 +8,25 @@ SEQUENCES = {
     'dynamic': (0,2,1,6,3,4,5),
 }
 
+def depth_instruction(project):
+    if project.get('flow_composition') != 'foreground':
+        return ''
+    if project.get('flow_layer_source') == 'direct':
+        return (
+            'TWO-PLANE COMPOSITION FOR PARALLAX. One locked camera and physically continuous setting. '
+            'NEAR: action, subjects, props and broad connected support on 55-70% of the frame. '
+            'Support continues beneath the camera through most of the bottom edge. '
+            'FAR: quieter visible depth above that support. Match perspective, scale, materials and motivated light. '
+            'Clear silhouettes and natural gaps; firm contact shadows. No floating ground or isolated islands. '
+            'Preserve source cast, action and setting.')
+    return ('TWO-PLANE COMPOSITION FOR PARALLAX. One continuous locked-camera still. '
+            'NEAR: group the story action, near figures, held props and immediate support. '
+            'FAR: leave a visible, quieter fixed setting. '
+            'CUT: use clear contrast and open gaps around fingers, hair and thin props. '
+            'Keep key silhouettes inside the frame, clear of busy lines and dense haze. '
+            'Keep both planes readable in close shots. Preserve the source cast and event.')
+
+
 def instruction(project, scene):
     if scene.get('frame_composition'):
         return ''  # A manually reviewed composition takes priority.

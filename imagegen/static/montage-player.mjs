@@ -1,3 +1,4 @@
+import {drawForeground} from './montage-foreground.mjs';
 import {normalize,opacity,audioGain,sourceSeconds,cameraBox,whiteFade} from './montage-timeline.mjs';
 
 function waitMedia(media,event,ready){
@@ -42,18 +43,35 @@ export class MontagePlayer{
     const assignments=[];
     const used=new Set();
     for(const c of clips){let v=this.videos.find(m=>!used.has(m)&&m.dataset.clip===c.edit_clip_id)||this.videos.find(m=>!used.has(m));used.add(v);v.dataset.clip=c.edit_clip_id;assignments.push([v,c]);}
-    for(const v of this.videos)if(!used.has(v)){v.pause();v.style.visibility='hidden';v.volume=0;}
+    for(const v of this.videos)if(!used.has(v)){v.pause();v.style.visibility='hidden';v.volume=0;delete v.dataset.foreground;}
     await Promise.all(assignments.map(async([v,c],i)=>{
       const still=this.stills[this.videos.indexOf(v)];
       if(c.media_type==='image'){
-        v.pause();v.style.visibility='hidden';v.volume=0;
+        v.style.visibility='hidden';v.volume=0;
+        const effect=c.foreground_effect;
+        const seconds=sourceSeconds(c,time);
+        if(effect?.motion){
+          const base=Math.max(1000/24,c.base_duration_ms-1000/24);
+          const progress=Math.max(0,Math.min(1,(seconds*1000-c.trim_in_ms)/(c.playback_rate??1)/base));
+          v.dataset.foreground='1';
+          v.dataset.holding=String(progress>=1);
+          v.muted=true;
+          v.playbackRate=Math.max(.0625,Math.min(16,effect.motion_seconds*1000/base));
+          if(progress>=1)v.pause();
+          await this.position(v,effect.motion,progress*effect.motion_seconds,force || !this.playing);
+        }else{
+          delete v.dataset.foreground;
+          v.pause();
+        }
         if(still.asset!==c.source_image_asset_id){const image=new Image();image.src='/api/assets/'+c.source_image_asset_id;await image.decode();still.image=image;still.asset=c.source_image_asset_id;}
         const image=still.image,canvas=still.canvas,ctx=canvas.getContext('2d');ctx.fillStyle='black';ctx.fillRect(0,0,canvas.width,canvas.height);
-        if(c.camera_motion){const box=cameraBox(image.naturalWidth,image.naturalHeight,c.camera_motion,sourceSeconds(c,time)/Math.max(1/24,((c.camera_motion_total_ms||c.base_duration_ms)-(c.hold_last_ms||0))/1000-1/24));ctx.drawImage(image,box.x,box.y,box.w,box.h,0,0,canvas.width,canvas.height);}
+        if(c.foreground_effect)await drawForeground(ctx,still,c,image,seconds,v);
+        else if(c.camera_motion){const box=cameraBox(image.naturalWidth,image.naturalHeight,c.camera_motion,sourceSeconds(c,time)/Math.max(1/24,((c.camera_motion_total_ms||c.base_duration_ms)-(c.hold_last_ms||0))/1000-1/24));ctx.drawImage(image,box.x,box.y,box.w,box.h,0,0,canvas.width,canvas.height);}
         else{const scale=(c.framing==='fill'?Math.max:Math.min)(canvas.width/image.naturalWidth,canvas.height/image.naturalHeight),w=image.naturalWidth*scale,h=image.naturalHeight*scale;ctx.drawImage(image,(canvas.width-w)/2,(canvas.height-h)/2,w,h);}
         canvas.style.visibility='visible';canvas.style.zIndex=String(i+1);canvas.style.opacity=String(opacity(c,time));return;
       }
       still.canvas.style.visibility='hidden';
+      delete v.dataset.foreground;
       v.playbackRate=c.playback_rate??1;
       await this.position(v,c.source_video_asset_id,sourceSeconds(c,time),force);
       v.dataset.holding=String(sourceSeconds(c,time)>=(c.trim_out_ms/1000-.002));
@@ -104,7 +122,7 @@ export class MontagePlayer{
       try{
         await this.prepare(this.time);
         if(!this.playing||version!==this.version){for(const m of [...this.videos,...this.audio])m.pause();return;}
-        await Promise.all([...this.videos.filter(v=>v.style.visibility==='visible'&&v.dataset.holding!=='true'),...this.audio.filter(a=>a.dataset.active)].map(m=>m.paused?m.play():Promise.resolve()));
+        await Promise.all([...this.videos.filter(v=>(v.style.visibility==='visible'||v.dataset.foreground==='1')&&v.dataset.holding!=='true'),...this.audio.filter(a=>a.dataset.active)].map(m=>m.paused?m.play():Promise.resolve()));
         // Freeze the shared clock while media was buffering or seeking.
         if(performance.now()-now>80)last=performance.now();
         this.onTime?.(this.time,true);this.raf=requestAnimationFrame(tick);

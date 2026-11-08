@@ -99,15 +99,17 @@ def _cuts(story,target):
         spans.append((a,b))
     return spans,sentences
 
-def plan(analysis,story,target):
+def plan(analysis,story,target,*,flow_composition=None):
     if target is None:return analysis
     from ..domain import MAX_SCENES
     if type(target) is not int or not 1<=target<=MAX_SCENES:
         raise ValueError('Некорректное выбранное количество кадров.')
     source_hash=hashlib.sha256(story.encode()).hexdigest()
     previous=(analysis.get('diagnostics') or {}).get('storyboard') or {}
+    layered = flow_composition == 'foreground'
     if (previous.get('version')==VERSION and previous.get('requested_frames')==target
             and previous.get('story_sha256')==source_hash
+            and bool(previous.get('layered_composition')) == layered
             and len(analysis.get('scenes',[]))==previous.get('actual_frames')):
         from ..source_contract import require_complete_coverage
         require_complete_coverage(story,analysis['scenes'])
@@ -150,6 +152,7 @@ def plan(analysis,story,target):
         elif not pronoun:last_actors=[]
         sentence_context.append((physical,mentioned,depicted))
         previous_end=s.stop
+    shots = ('wide shot', 'medium shot', 'medium close-up' if layered else 'close-up')
     frames=[]
     for number,(a,b) in enumerate(spans,1):
         si=max(0,bisect.bisect_right(sentence_starts,a)-1)
@@ -180,7 +183,7 @@ def plan(analysis,story,target):
             'depicted_people':[characters[i]['name'] for i in depicted],
             'offscreen_characters':[],'voice_only_characters':[],
             'location':loc or 'Обстановка по исходному фрагменту','location_ref':loc,'location_id':lid,'time':'',
-            'shot':['wide shot','medium shot','close-up'][(number-1)%3],
+            'shot':shots[(number-1)%len(shots)],
             'emotion':'','wardrobe':{n:'default' for n in names},'props':[],'negative':'',
             'continuity_before':'','continuity_after':'',
             'duration_sec':round(max(1,len(re.sub(r'\s+',' ',quote))/15),3),
@@ -195,6 +198,8 @@ def plan(analysis,story,target):
           'semantic_episodes_count':len(episodes),'semantic_episodes':episodes,
           'story_sha256':source_hash,'method':'local_source_partition_after_global_analysis',
           'source_coverage_complete':True,'semantic_accuracy_measured':False,'additional_model_requests':0}
+    if layered:
+        info['layered_composition'] = True
     result.setdefault('diagnostics',{}).update(storyboard=info,scenes_count=len(frames))
     result.setdefault('warnings',[]).append('Кадры разделены по точным фрагментам сценария; локальная раскадровка не подтверждает смысловую точность изображения.')
     if len(frames)!=target:

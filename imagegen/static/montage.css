@@ -1097,3 +1097,30 @@ body.montage-resizing video {
   color: #34d399 !important;
   cursor: default !important;
 }
+
+.montage-foreground-dialog {
+  width: min(760px, 94vw);
+  max-height: 94vh;
+  overflow: auto;
+  padding: 16px;
+  color: #e8ecf7;
+  background: #101626;
+  border: 1px solid #3e4773;
+  border-radius: 12px;
+}
+.montage-foreground-dialog::backdrop { background: #05060bbb; }
+.montage-foreground-dialog label { display: block; margin: 8px 0; }
+.montage-foreground-dialog button { margin: 4px 8px 0 0; }
+.montage-pair-preview {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  cursor: crosshair;
+  background: #060910;
+  margin: 8px 0;
+}
+.montage-foreground-dialog textarea {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}

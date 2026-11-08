@@ -574,8 +574,9 @@ class Worker:
         # fixed. Casting never changes this plan or the requested frame count.
         if analysis.get('analyzer_version')=='deepseek' and snapshot.get('target') is not None:
             from .script_analysis.storyboard import plan
-            story=(snapshot.get('project') or {}).get('story') or self.service.project(generation['project_id'])['story']
-            analysis=plan(analysis,story,snapshot['target'])
+            project = snapshot.get('project') or self.service.project(generation['project_id'])
+            story = project.get('story') or self.service.project(generation['project_id'])['story']
+            analysis=plan(analysis,story,snapshot['target'],flow_composition=project.get('flow_composition'))
         if not snapshot.get('pending_analysis'):
             snapshot['pending_analysis'] = json.loads(json.dumps(analysis, ensure_ascii=False))
             self.update(generation, snapshot=snapshot)
@@ -1241,7 +1242,9 @@ class Worker:
                                if 2 <= stats[cv2.CC_STAT_AREA] <= 300 and
                                2 <= stats[cv2.CC_STAT_HEIGHT] <= bh]
                 glyph_density = sum(stats[cv2.CC_STAT_AREA] for stats in glyph_parts) / float(bw * bh)
-                if (0.045 <= density <= 0.42 and len(glyph_parts) >= 20 and
+                letter_sized = sum(part[cv2.CC_STAT_HEIGHT] >= max(2, int(bh * .35))
+                                   for part in glyph_parts)
+                if (0.045 <= density <= 0.42 and letter_sized >= 20 and
                         glyph_density >= 0.04):
                     return True
 
@@ -1274,7 +1277,11 @@ class Worker:
                 selected = raw_line > 0
                 mean_saturation = np.mean(
                     middle_hsv[y:y + bh, x:x + bw, 1][selected]) if selected.any() else 255
-                if len(glyph_parts) >= 30 and glyph_density >= 0.05 and mean_saturation < 65:
+                # A line of text has letter-height components. Tiny highlights
+                # scattered over a tall stone surface are not floating words.
+                letter_sized = sum(part[cv2.CC_STAT_HEIGHT] >= max(2, int(bh * .35))
+                                   for part in glyph_parts)
+                if letter_sized >= 30 and glyph_density >= 0.05 and mean_saturation < 65:
                     return True
 
             # A dialogue bubble is a smooth, pale, enclosed region with a sizeable

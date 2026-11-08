@@ -1,7 +1,7 @@
 {
-  "version": "0.2.0rc3",
+  "version": "0.2.0rc4",
   "channel": "candidate",
-  "bridge_version": "0.1.89",
+  "bridge_version": "0.1.93",
   "bridge_channel": "frameforge.bridge.v1",
   "adapter_protocol": 2,
   "python": "3.12",

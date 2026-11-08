@@ -51,7 +51,7 @@ def is_animated(clip, scene_ids=(), *, cover_photo_motion=False):
     if (clip.get('source_kind') or 'scene') == 'footage':
         return False
     return bool(clip.get('source_video_asset_id') or clip.get('media_type') == 'video'
-                or (clip.get('camera_motion') and not cover_photo_motion) or clip.get('scene_id') in scene_ids)
+                or clip.get('foreground_effect') or (clip.get('camera_motion') and not cover_photo_motion) or clip.get('scene_id') in scene_ids)
 
 
 def protected_reason(clip, scene_ids=(), *, cover_photo_motion=False):
