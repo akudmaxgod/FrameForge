@@ -454,7 +454,7 @@ class Worker:
                     analysis_result,
                     story_text,
                     mode=project.get('mode', 'cinematic'),
-                    project=project, target=snapshot.get('target'),
+                    project=project, target=None if project.get('visual_format')=='science_atlas' else snapshot.get('target'),
                 )
                 self._save_analysis(generation, app_analysis, project['version'])
                 return
@@ -572,12 +572,30 @@ class Worker:
         settings = snapshot.get('profile', {})
         # Also cover durable checkpoints created before target propagation was
         # fixed. Casting never changes this plan or the requested frame count.
-        if analysis.get('analyzer_version')=='deepseek' and snapshot.get('target') is not None:
+        if (analysis.get('analyzer_version')=='deepseek' and snapshot.get('target') is not None
+                and (snapshot.get('project') or self.service.project(generation['project_id'])).get('visual_format')!='science_atlas'):
             from .script_analysis.storyboard import plan
             project = snapshot.get('project') or self.service.project(generation['project_id'])
             story = project.get('story') or self.service.project(generation['project_id'])['story']
             analysis=plan(analysis,story,snapshot['target'],flow_composition=project.get('flow_composition'))
-        if not snapshot.get('pending_analysis'):
+        project = snapshot.get('project') or self.service.project(generation['project_id'])
+        if project.get('visual_format')=='science_atlas' and analysis.get('_verified_science_reuse'):
+            from .science_plan_reuse import verify
+            analysis=verify(self.service,project,analysis)
+        elif project.get('visual_format')=='science_atlas' or analysis.get('analyzer_version') == 'deepseek':
+            if project.get('visual_format')=='science_atlas':
+                from .science_atlas import stage
+            else:
+                from .script_analysis.compact_staging import stage
+            project = snapshot.get('project') or self.service.project(generation['project_id'])
+            analysis = stage(analysis, project.get('story') or self.service.project(generation['project_id'])['story'],
+                api_key=settings.get('deepseek_api_key') or os.environ.get('DEEPSEEK_API_KEY'),
+                progress=lambda message, percent: self.update(generation,
+                    progress={'stage': message, 'percent': percent}))
+        if project.get('visual_format')=='science_atlas':
+            from .science_details import prepare
+            analysis=prepare(analysis)
+        if snapshot.get('pending_analysis') != analysis:
             snapshot['pending_analysis'] = json.loads(json.dumps(analysis, ensure_ascii=False))
             self.update(generation, snapshot=snapshot)
 
@@ -606,7 +624,12 @@ class Worker:
             if has_scenes:
                 if not snapshot.get('analysis_rebuild'):
                     raise DomainError('Сцены уже существуют; разбор не заменён.', 409)
-                self.service._clear_analysis_for_replacement(connection, project_id)
+                if project_record.get('visual_format')=='science_atlas':
+                    from .science_plan_store import archive_auto_plan
+                    archive_id=archive_auto_plan(self.service,connection,project_id,generation['id'])
+                    analysis.setdefault('diagnostics',{}).setdefault('science_atlas',{})['previous_plan_archive_id']=archive_id
+                else:
+                    self.service._clear_analysis_for_replacement(connection, project_id)
 
             saved_characters = []
             saved_locations = []
@@ -699,6 +722,7 @@ class Worker:
 
             metadata_dict = dict(analysis.get('v3_metadata') or analysis.get('v2_metadata') or {})
             metadata_dict['analyzer_version'] = analysis.get('analyzer_version', 'deepseek')
+            if analysis.get('deepseek_usage'):metadata_dict['deepseek_usage']=analysis['deepseek_usage']
             if 'diagnostics' in analysis:
                 metadata_dict['diagnostics'] = analysis['diagnostics']
             connection.execute('UPDATE projects SET world=?,cast_bible=?,analysis_metadata=?,version=version+1 WHERE id=?',
@@ -729,6 +753,10 @@ class Worker:
                 'auto_casts': 0,
                 'analyzer_version': 'deepseek',
             })
+
+        if project_record.get('visual_format')=='science_atlas':
+            from .science_atlas_render import assemble_project
+            assemble_project(self.service,project_id)
 
     def monitor(self, generation):
         if generation['purpose'] == 'analysis':
@@ -901,7 +929,7 @@ class Worker:
                 raise DetectorUnavailableError('Не удалось загрузить локальную модель детектора.') from error
         try:
             from .detector_process import count_instances
-            result = detector(image, device='cpu', imgsz=640, conf=confidence, verbose=False)[0]
+            result = detector(image, device='cuda:0', imgsz=640, conf=confidence, verbose=False)[0]
             return count_instances(result)
         except Exception as error:
             raise DetectorUnavailableError('Ошибка выполнения CPU-детектора.') from error
@@ -918,6 +946,11 @@ class Worker:
     def _get_identity_analyser(self):
         if self._identity_analyser is not None:
             return self._identity_analyser
+        from .gpu_runtime import prepare_dlls
+        prepare_dlls()
+        import onnxruntime as ort
+        ort.preload_dlls()
+        if 'CUDAExecutionProvider' not in ort.get_available_providers():raise RuntimeError('CUDA для проверки лиц недоступна; CPU-режим отключён.')
         from insightface.app import FaceAnalysis
         from pathlib import Path
         candidates = [
@@ -943,8 +976,11 @@ class Worker:
 
         self._identity_analyser = FaceAnalysis(
             name='buffalo_l', root=selected_root,
-            providers=['CPUExecutionProvider'])
-        self._identity_analyser.prepare(ctx_id=-1, det_size=(320, 320))
+            providers=['CUDAExecutionProvider'])
+        self._identity_analyser.prepare(ctx_id=0, det_size=(320, 320))
+        if any(model.session.get_providers()[0]!='CUDAExecutionProvider' for model in self._identity_analyser.models.values()):
+            self._identity_analyser=None
+            raise RuntimeError('Проверка лиц не смогла включить CUDA; откат на CPU отключён.')
         return self._identity_analyser
 
     def _human_portrait_references(self, snapshot):

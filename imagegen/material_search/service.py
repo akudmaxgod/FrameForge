@@ -102,6 +102,13 @@ class MaterialSearchService:
     def get_job_candidates(self, project_id: str, job_id: str) -> List[Dict[str, Any]]:
         return self.jobs.get_job_candidates(project_id, job_id)
 
+    def latest_pixabay_scenario(self, project_id: str) -> Dict[str, Any]:
+        self.service.project(project_id)
+        row = self.db.one("SELECT j.id,j.plan_id FROM material_search_jobs j JOIN material_search_plans p ON p.id=j.plan_id WHERE j.project_id=? AND json_extract(p.options_json,'$.pixabay_scenario')=1 ORDER BY j.created_at DESC LIMIT 1", (project_id,))
+        if not row:
+            return {"ok": True, "job": None, "plan": None}
+        return {"ok": True, "job": self.get_job(project_id, row["id"]), "plan": self.get_plan(project_id, row["plan_id"])}
+
     def get_candidates(self, project_id: str, job_id: str) -> List[Dict[str, Any]]:
         return self.jobs.get_job_candidates(project_id, job_id)
 
@@ -339,6 +346,11 @@ class MaterialSearchService:
         if not media_item:
             raise DomainError("Импортированный медиа-файл не найден в медиатеке.", 404)
 
+        from ..media_single_use import tokens, used_in_project
+        other_document = dict(current_doc, clips=[c for c in current_doc.get("clips", []) if (c.get("edit_clip_id") or c.get("id")) not in set(origin_clip_ids)])
+        if tokens(dict(media_item, item_id=imported_item_id)) & used_in_project(self.service, project_id, other_document):
+            raise DomainError("Этот файл уже использован в другом сегменте. Выберите другую вставку.", 409)
+
         # Ensure asset is registered in assets table for Editing validation
         media_path = media_item.get("file_path") or f"media_library/{imported_item_id}.jpg"
         media_sha = media_item.get("sha256") or "unknown_sha"
@@ -400,6 +412,7 @@ class MaterialSearchService:
                     "enabled": True,
                     "candidate_id": candidate_id,
                     "media_library_item_id": imported_item_id,
+                    "media_content_sha256": media_sha,
                     "provider": cand.get("provider", ""),
                     "external_id": cand.get("external_id", "")
                 }

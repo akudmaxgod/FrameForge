@@ -14,10 +14,10 @@ MEDICAL_COMPACT=('Preserve source-stated illness, pain, swelling, asymmetry, pal
  'For internal illness use stated behavior/expression; invent no cutaway, diagram or anatomical finding.')
 PEOPLE_COMPACT=('Depict people/body parts only when the current source requires them; unnamed source actors need no fixed portrait. Do not substitute an empty room for a bodily state. No invented census, bystanders, identities or illness. Authors/statues/portraits are not living actors.')
 GRITTY_COMPACT = (
-    'Gritty Graphic Novel: 2D variable-weight dark ink, fine face/architecture lines, hatched fur, chainmail and stone. '
-    'Muted ochre, brown, olive, slate and dusty blue, sparse deep red. Matte flat colors, subtle gradients, soft form and hard cast shadows, paper grain and depth. '
-    'Realistic adult 1:6–1:7 proportions, natural hands/drapery, distinct faces. Keep screen/reference identity, face, hairline, age, build and scars. '
-    'Story cast, action and setting only. No photos, 3D, brushwork, cel shading, gloss, captions or speech balloons.'
+    'Gritty Graphic Novel: visibly DRAWN 2D ink faces and scenery; dark contours, crosshatched fur/chainmail/stone, matte flat color shapes, paper grain. '
+    'Muted ochre, brown, olive, slate, dusty blue; sparse deep red. Soft form/hard cast shadows. '
+    'Age-correct anatomy, natural hands/drapery. Match reference face, hairline, age, build, scars. '
+    'Only story cast/action/setting. No photographic skin, live-action still, 3D, brushwork, cel shading, gloss, captions or speech balloons.'
 )
 
 def units(text):return len(text.encode('utf-16-le'))//2
@@ -88,7 +88,12 @@ def pack(prompt, *, budget=BASE_BUDGET):
         if isinstance(compact.get('direction'),str) and normalized(compact['direction']) in normalized(body):compact.pop('direction')
         quote=evidence.get('quote')
         if isinstance(quote,str) and normalized(quote) not in normalized(body) and not any(normalized(quote) in normalized(v) for v in compact.values()):compact['source_quote']=quote
-        for key in ('location','spatial_place'):
+        manual = compact.get('manual_decision')
+        if isinstance(manual, dict) and isinstance(manual.get('direction'), str):
+            if normalized(manual['direction']) and normalized(manual['direction']) in normalized(body):
+                # Preserve editorial precedence/applied flag, transport exact text once.
+                compact['manual_decision'] = {k: v for k, v in manual.items() if k != 'direction'}
+        for key in ('location','spatial_place','period'):
             if isinstance(compact.get(key),str) and normalized(compact[key]) in normalized(body):compact.pop(key)
         if compact.get('free_design')==['lighting','framing','minor decoration','background headcount unless source-critical']:
             compact.pop('free_design')  # application default design freedom, no source fact

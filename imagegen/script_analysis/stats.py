@@ -21,6 +21,7 @@ class Stats:
     result_cache_hit: bool = False
     pass_a_cost: float = 0.0
     pass_b_cost: float = 0.0
+    pass_c_cost: float = 0.0
     requests: int = 0
     usage_complete: bool = True
 
@@ -49,7 +50,7 @@ class Stats:
         self.cache_miss_tokens += miss
         self.cache_hit = self.cache_hit_tokens > 0
         self.cost_usd = float(Decimal(str(self.cost_usd)) + cost)
-        attr = "pass_a_cost" if phase == "A" else "pass_b_cost"
+        attr = {"A": "pass_a_cost", "B": "pass_b_cost", "C": "pass_c_cost"}[phase]
         setattr(self, attr, float(Decimal(str(getattr(self, attr))) + cost))
         log.info("usage phase=%s tokens_in=%s tokens_out=%s cache_hit_tokens=%s peak=%s cost_usd=%s",
                  phase, incoming, outgoing, hit, peak, cost)

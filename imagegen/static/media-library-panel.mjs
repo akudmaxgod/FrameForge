@@ -438,8 +438,8 @@ export async function openMediaMatchModal({ projectId, api, notice, onDocumentCh
       for(const [id,checkbox] of checkboxes){
         checkbox.checked=selectedProposalIds.has(id);
         const reason=res.skipped?.[id];
-        if(['animated','locked','existing_footage','changed_segment','excluded'].includes(reason))protectedSelections.add(id);
-        if(protectedSelections.has(id)){checkbox.disabled=true;checkbox.title=reason==='animated'?'Готовая анимация защищена от вставок.':'Кадр защищён или уже содержит вставку.';}
+        if(['animated','locked','existing_footage','changed_segment','excluded','duplicate_material'].includes(reason))protectedSelections.add(id);
+        if(protectedSelections.has(id)){checkbox.disabled=true;checkbox.title=reason==='duplicate_material'?'Этот материал уже выбран или использован в ролике.':reason==='animated'?'Готовая анимация защищена от вставок.':'Кадр защищён или уже содержит вставку.';}
       }
       coverageSummary.textContent=coverageText(res);previewReady=true;applyBtn.disabled=!selectedProposalIds.size;
     }catch(e){if(sequence===previewSequence){coverageSummary.textContent=e.message;notice(e.message,true);}}

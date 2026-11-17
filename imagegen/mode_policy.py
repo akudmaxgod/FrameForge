@@ -7,6 +7,7 @@ KINDS = {
 }
 
 def allows(project, kind):
+    if project.get('visual_format')=='science_atlas':return kind=='prop'
     return kind in KINDS.get(project.get('mode','characters'), KINDS['characters'])
 
 def filter_references(project, references):

@@ -386,6 +386,9 @@ body.montage-resizing video {
   z-index: 5;
   border-bottom: 1px solid #1c2438;
 }
+.montage-library-tabs.with-effects {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
 .montage-library-tabs button {
   border: 1px solid transparent;
   background: transparent;
@@ -638,6 +641,16 @@ body.montage-resizing video {
   border: 1px solid #1e2538;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
+#montage-panel-effects label {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+#montage-panel-effects input {
+  width: 100%;
+}
+
 .montage-stage video,
 .montage-stage canvas {
   position: absolute;

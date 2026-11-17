@@ -1,14 +1,25 @@
 export const IMPORT_VERSION='user-prompt-txt/1';
-export const MAX_PROMPT_LENGTH=1950;
+export const MAX_PROMPT_LENGTH=11000;
 export const MAX_PROMPTS=2000;
+
+export function numberedPrompts(source){
+  const matches=[...source.matchAll(/\[(\d{1,4})\.\s+/gu)];
+  if(!matches.length||source.slice(0,matches[0].index).trim())throw Error('Ожидаются сцены [001. Промпт] [002. Промпт]. Текст не обрезан.');
+  return matches.map((match,i)=>{
+    const block=source.slice(match.index,matches[i+1]?.index??source.length).trim();
+    if(Number(match[1])!==i+1||!block.endsWith(']')||!block.slice(match[0].length,-1).trim())throw Error('Проверьте последовательную нумерацию и скобки сцен: [001. Промпт] [002. Промпт]. Текст не обрезан.');
+    return block;
+  });
+}
 
 export function parsePrompts(text,separator='paragraphs'){
   if(typeof text!=='string'||!text.trim()||text.length>4000000)throw Error('Выберите непустой TXT с промптами до 4 миллионов символов.');
   if(/[\u0000\ufffd]/u.test(text))throw Error('Не удалось прочитать TXT. Сохраните файл в UTF-8.');
   if(/^\s*\[\s*(?:\{|\])/.test(text))return parsePromptBundle(text,separator).map(item=>item.prompt);
-  if(!['paragraphs','lines'].includes(separator))throw Error('Выберите разделитель промптов.');
+  if(!['paragraphs','lines','numbered'].includes(separator))throw Error('Выберите разделитель промптов.');
   const normalized=text.replace(/^\ufeff/,'').replace(/\r\n?/g,'\n');
-  const parts=(separator==='lines'?normalized.split('\n'):normalized.split(/\n[\t ]*\n(?:[\t ]*\n)*/)).map(s=>s.trim()).filter(Boolean);
+  const numbered=separator==='numbered'||(separator==='paragraphs'&&/^\s*\[0*1\.\s+/u.test(normalized));
+  const parts=numbered?numberedPrompts(normalized):(separator==='lines'?normalized.split('\n'):normalized.split(/\n[\t ]*\n(?:[\t ]*\n)*/)).map(s=>s.trim()).filter(Boolean);
   if(!parts.length||parts.length>MAX_PROMPTS)throw Error(`В файле должно быть от 1 до ${MAX_PROMPTS} промптов.`);
   for(let i=0;i<parts.length;i++)if(parts[i].length>MAX_PROMPT_LENGTH)throw Error(`Промпт ${i+1}: ${parts[i].length} символов; максимум ${MAX_PROMPT_LENGTH}. Проверьте разделитель. Текст не обрезан.`);
   return parts;
@@ -54,7 +65,7 @@ export function openPromptImport({dialog,api,onCreated,notice}){
   const script=node('input');script.type='file';script.accept='.txt,text/plain';script.setAttribute('aria-label','Файл сценария TXT');
   const prompts=node('input');prompts.type='file';prompts.accept='.txt,.json,text/plain,application/json';prompts.setAttribute('aria-label','Файл готовых промптов TXT или JSON');
   const separator=node('select');separator.setAttribute('aria-label','Разделитель промптов');
-  for(const [value,label] of [['paragraphs','Пустая строка между промптами'],['lines','Каждая непустая строка — отдельный промпт']]){const o=node('option',label);o.value=value;separator.append(o);}
+  for(const [value,label] of [['paragraphs','Авто: абзацы или [001. …] [002. …]'],['lines','Каждая непустая строка — отдельный промпт'],['numbered','Нумерованные блоки [001. …] [002. …]']]){const o=node('option',label);o.value=value;separator.append(o);}
   const seconds=node('input');seconds.type='number';seconds.min='1';seconds.max='60';seconds.step='0.5';seconds.value='5';seconds.setAttribute('aria-label','Секунд на кадр');
   const summary=node('p','Выберите оба файла.','muted');summary.setAttribute('role','status');summary.dataset.testid='prompt-import-summary';
   const preview=node('div');preview.dataset.testid='prompt-import-preview';
@@ -102,7 +113,7 @@ export function openPromptImport({dialog,api,onCreated,notice}){
   };
   body.append(field('Название проекта',title),field('Сценарий · TXT',script),field('Промпты сцен · TXT / JSON',prompts),
     field('Как разделены сцены',separator),field('Длительность одного кадра, сек.',seconds),summary,preview,error,
-    node('p',`Формат: один промпт на абзац, между ними пустая строка. До ${MAX_PROMPTS} кадров; до ${MAX_PROMPT_LENGTH} символов в каждом. Обычные пробелы остаются частью промпта.`,'muted'),submit);
+    node('p',`Формат: абзацы с пустой строкой или блоки [001. …] [002. …], в том числе в одной строке. До ${MAX_PROMPTS} кадров; до ${MAX_PROMPT_LENGTH} символов в каждом. Обычные пробелы остаются частью промпта.`,'muted'),submit);
   const example=node('a','Скачать образец JSON с фрагментами озвучки');example.href='/prompt-narration-example.json';example.download='prompts-with-narration.json';const task=node('a','Задание для чата, который пишет промпты');task.href='/prompt-narration-chat.txt';task.download='prompt-narration-chat.txt';body.append(example,node('br'),task);
   dialog.showModal();
 }

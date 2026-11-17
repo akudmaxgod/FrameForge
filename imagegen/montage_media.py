@@ -53,7 +53,9 @@ class StillReader:
                 scale=min(size[0]/self.source.width,size[1]/self.source.height)
                 output_size=(max(1,round(self.source.width*scale)),max(1,round(self.source.height*scale)))
             # Resize directly from a fractional box, as in the local 2.5D renderer.
-            moving = self.source.resize(output_size, Image.Resampling.BICUBIC,
+            from .gpu_pixels import CudaImage
+            if not hasattr(self,"gpu_source"):self.gpu_source=CudaImage(self.source)
+            moving = self.gpu_source.resize(output_size,
                                         box=(x, y, min(self.source.width, x+w),
                                              min(self.source.height, y+h)))
             if output_size == size:
@@ -63,7 +65,8 @@ class StillReader:
             return canvas
         geometry = (size, fill)
         if geometry != self.static_geometry:
-            image = (ImageOps.fit if fill else ImageOps.contain)(self.source, size, Image.Resampling.BICUBIC)
+            from .gpu_pixels import fit
+            image = fit(self.source,size,fill)
             if image.size != size:
                 canvas = Image.new('RGB', size, 'black')
                 canvas.paste(image, ((size[0]-image.width)//2, (size[1]-image.height)//2))

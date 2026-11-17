@@ -67,9 +67,13 @@ class FlowAdmission:
                 if (old['project'],old['scene'],old['revision'],old['prompt_hash'])!=(pid,scene_id,revision,signature):
                     raise DomainError('Идентификатор Flow уже использован для другого задания.',409)
                 return {'enabled':True,'allowed':old['state']=='reserved','state':old['state']}
+            if db.execute("SELECT 1 FROM admissions WHERE project=? AND scene=? AND revision=? AND state='uncertain'",
+                          (pid,scene_id,revision)).fetchone():
+                return {'enabled':True,'allowed':False,'state':'needs_resolution',
+                        'reason':'Исход прежнего запроса Flow для этого кадра ещё неизвестен.'}
             pending=self.service.google_generation_capacity(pid)['pending']
             reserved=db.execute("SELECT count(*) FROM admissions WHERE project=? AND state='reserved'",(pid,)).fetchone()[0]
-            if pending+reserved>=4:
+            if pending+reserved>=8:
                 return {'enabled':True,'allowed':False,'pending':pending,'reserved':reserved,'state':'capacity_wait','reason':('Ожидается проверка предыдущих кадров.' if pending else 'Заняты разрешения незавершённых запросов Flow. Генерация не отправлена.')}
             db.execute('INSERT INTO admissions VALUES(?,?,?,?,?,?)',(request_id,pid,scene_id,revision,signature,'reserved'))
             db.execute('INSERT INTO request_documents VALUES(?,?,?,?)', (request_id, prompt,
@@ -81,7 +85,7 @@ class FlowAdmission:
         scene=self.service.scene(scene_id)
         with self.db() as db:
             row=db.execute('SELECT * FROM admissions WHERE request_id=?',(request_id,)).fetchone()
-            if not row or row['scene']!=scene_id or row['project']!=scene['project_id'] or row['revision']!=scene['current_revision'] or row['state'] not in ('reserved','uploaded'):
+            if not row or row['scene']!=scene_id or row['project']!=scene['project_id'] or row['revision']!=scene['current_revision'] or row['state'] not in ('reserved','uncertain','uploaded'):
                 raise DomainError('Разрешение Flow отсутствует или устарело. Результат сохранён в мосте.',409)
 
     def finish(self,scene_id,request_id,outcome):
@@ -89,12 +93,12 @@ class FlowAdmission:
         if outcome not in ('uploaded','rejected'):
             raise DomainError('Неизвестный исход Flow.',400)
         with self.db() as db:
-            db.execute("UPDATE admissions SET state=? WHERE request_id=? AND state='reserved'",(outcome,request_id))
+            db.execute("UPDATE admissions SET state=? WHERE request_id=? AND state IN ('reserved','uncertain')",(outcome,request_id))
 
     def fail(self,scene_id,request_id,code):
         """Close a confirmed terminal attempt, never an unknown transport result."""
         if code not in ('ERR_GEN_FAILED','COMPOSITION_REJECTED','FLOW_SERVICE_UNAVAILABLE',
-                        'ERR_UNSUPPORTED_MODEL','ERR_TOO_MANY_REFS','FLOW_BUSY','PREFLIGHT_REJECTED','NOT_SENT'):
+                        'ERR_UNSUPPORTED_MODEL','ERR_TOO_MANY_REFS','FLOW_BUSY','PREFLIGHT_REJECTED','NOT_SENT','RESULT_UNKNOWN'):
             raise DomainError('Неизвестный подтверждённый отказ Flow.',400)
         scene=self.service.scene(scene_id)
         with self.db() as db:
@@ -107,7 +111,10 @@ class FlowAdmission:
             # slot merely because the user has since edited this scene.
             if row['scene']!=scene_id or row['project']!=scene['project_id']:
                 raise DomainError('Разрешение Flow принадлежит другому заданию.',409)
-            if row['state'] not in ('reserved','failed','rejected'):
+            if code == 'RESULT_UNKNOWN':
+                db.execute("UPDATE admissions SET state='uncertain' WHERE request_id=? AND state='reserved'",(request_id,))
+                return {'ok':True,'state':'uncertain' if row['state']=='reserved' else row['state']}
+            if row['state'] not in ('reserved','uncertain','failed','rejected'):
                 raise DomainError('Попытка Flow уже завершена другим результатом.',409)
-            db.execute("UPDATE admissions SET state='failed' WHERE request_id=? AND state='reserved'",(request_id,))
-        return {'ok':True,'state':'failed' if row['state']=='reserved' else row['state']}
+            db.execute("UPDATE admissions SET state='failed' WHERE request_id=? AND state IN ('reserved','uncertain')",(request_id,))
+        return {'ok':True,'state':'failed' if row['state'] in ('reserved','uncertain') else row['state']}

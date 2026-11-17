@@ -1,0 +1,8 @@
+# Main environment; CUDA/cuDNN DLLs come from the configured CUDA detector runtime.
+cupy-cuda12x==14.2.0
+onnxruntime-gpu==1.22.0
+cuda-pathfinder==1.8.6
+nvidia-cuda-runtime-cu12==12.9.79
+tokenizers==0.23.3
+
+nvidia-cuda-nvrtc-cu12==12.9.86

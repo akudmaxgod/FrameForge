@@ -18,7 +18,7 @@ from imagegen.service import Service
 from imagegen.server import make_server, Application
 from imagegen.editing import normalize
 from imagegen.export_worker import render
-from tests import veo_fixture
+from tests import test_veo_animation as veo_fixture
 
 
 def wav():
@@ -177,7 +177,7 @@ class MontageTests(unittest.TestCase):
             def close(self):
                 super().close();active[0]-=1
         with patch.object(export_worker,'VideoReader',Tracked):
-            duration=render(self.service,self.doc,self.service.root/'large.mp4',lambda *a:None,lambda:False,size=(32,24))
+            duration=render(self.service,self.doc,self.service.root/'large.mp4',lambda *a:None,lambda:False,size=(160,90))
         self.assertEqual(active[0],0);self.assertLessEqual(active[1],2);self.assertEqual(active[1],2)
         self.assertAlmostEqual(duration,19.76,delta=1/24)
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name FrameForge Flow Bridge (new)
 // @namespace frameforge.local.bridge
-// @version 0.1.93
+// @version 0.1.104
 // @match https://flow.google.com/project/*
 // @match https://flow.google.com/u/*/project/*
 // @grant GM_xmlhttpRequest
@@ -26,6 +26,25 @@
  const SDK_PROFILE_FAILURE_LIMIT=2;
  const BRIDGE_STATE_VERSION=2;
  let peer=null, peerOrigin=null, running=false, pauseRequested=false;
+ const RECOVERY_STORE='ff-flow-v1-recovery';
+ const recoveryKey=flow=>`${RECOVERY_STORE}:${flow}`;
+ let progressAt=Date.now(), watchdogReloading=false;
+ const recoveryAction=({intent,running,livePending,elapsed,now})=>{
+  if(!intent?.enabled||intent.attempts>=3)return null;
+  if(running)return elapsed>=420000&&!livePending?'reload':null;
+  return now>=(intent.nextAt||0)?'resume':null;
+ };
+ const transientRecoveryError=error=>/таймаут|не ответил|недоступен|network|timeout|transport|HTTP 50[234]/i.test(String(error?.message||error||''))
+  && !/подозрительн|suspicious|captcha|нарушает|policy|quota|лимит|429/i.test(String(error?.message||error||''));
+ function stopRecovery(){const flow=getFlowProjectId();if(flow)GM_setValue(recoveryKey(flow),null);}
+ function retryRecovery(){
+  const key=recoveryKey(getFlowProjectId()),intent=GM_getValue(key,null);
+  if(!intent?.enabled)return;
+  intent.attempts=(intent.attempts||0)+1;
+  intent.nextAt=Date.now()+Math.min(120000,15000*2**(intent.attempts-1));
+  if(intent.attempts>=3)intent.enabled=false;
+  GM_setValue(key,intent);
+ }
  const pending=new Map();
  let adapterImageConcurrency=1;
  const referenceImports=new Map();
@@ -128,7 +147,7 @@
  btnRow.append(check,start,pause,reset);
  root.append(status,btnRow);document.body.append(root);
  const tell=text=>{console.log('[FF Bridge Status]',text);status.textContent=text;};
- const save=()=>{if(state)GM_setValue(queueKey(state.projectId,state.flowProject),state);};
+ const save=()=>{progressAt=Date.now();if(state)GM_setValue(queueKey(state.projectId,state.flowProject),state);};
  // Semantic visual failures are retryable: they are bad candidates, never a
  // finished storyboard frame.  Transport/API failures still stop so that a
  // broken bridge does not spin forever.
@@ -172,7 +191,7 @@
     console.warn('[FF Bridge] Failed to load ref for composite canvas:', ref.name, e);
    }
   }
-  if(loaded.length<2)return null;
+  if(loaded.length!==selectedRefs.length)return null;
 
   const targetW=1536, targetH=864, pad=12, bannerH=32;
   const canvas=document.createElement('canvas');
@@ -363,16 +382,33 @@
    return mediaId;
  }
 
+ function promptRejection(error,legacy=false) {
+   if(!legacy&&error?.flow?.remoteReply!==true)return null;
+   const text=[error?.flow?.code,error?.flow?.message,error?.message||error].join(' ');
+   if(/unusual activity|suspicious activity|подозрительн|timeout|таймаут|transport|network/i.test(text))return null;
+   if(/\b(?:FLOW_POLICY_\w+|CONTENT_POLICY_VIOLATION|SAFETY_VIOLATION)\b|(?:may |might )?violate[sd]?.{0,80}polic|наруша(?:ть|ет|ют).{0,40}правил/i.test(text))return 'policy';
+   if(/\b(?:ERR_INVALID_PROMPT|PROMPT_TOO_LONG|INVALID_PROMPT)\b|prompt (?:is )?too long|промпт слишком длинн/i.test(text))return 'format';
+   return null;
+ }
+
+ function compactRejectedPrompt(prompt) {
+   // Preserve all words and quoted values. Only normalize whitespace outside
+   // quoted text so the render contract and author wording survive the retry.
+   return prompt.split(/("(?:[^"\\]|\\.)*")/).map((part,index)=>
+     index%2 ? part : part.replace(/[ \t]{2,}/g,' ').replace(/\n{3,}/g,'\n\n')).join('').trim();
+ }
+
  function confirmedRemoteFailure(error,legacy=false) {
    const flow=error?.flow||{};
    if(!legacy && flow.remoteReply!==true)return false;
    const text=String(error?.message||error||'');
    // A network/decode failure can hide a completed paid image. Keep it unknown.
    if(/timeout|timed out|таймаут|не ответил|no transferable|decode|network|transport|медиа.*не найден/i.test(text))return false;
-   return /ERR_UNSUPPORTED_MODEL|ERR_TOO_MANY_REFS|FLOW_BUSY|PreflightError|Сервис создания изображений недоступен/i.test(text+' '+String(flow.code||''));
+   return !!promptRejection(error,legacy)||/ERR_UNSUPPORTED_MODEL|ERR_TOO_MANY_REFS|FLOW_BUSY|PreflightError|Сервис создания изображений недоступен/i.test(text+' '+String(flow.code||''));
  }
  function recordFailedScene(root,job,error) {
    const failure={requestId:job.requestId,sceneId:job.id,position:job.position,
+     sceneRevision:job.scene_revision,
      code:error?.flow?.code||job.remoteFailure?.code||'REMOTE_REJECTED',
      reason:String(error?.message||error||''),admissionEnabled:job.admissionEnabled,status:'failed_remote',at:new Date().toISOString()};
    root.failedScenes=root.failedScenes||{};
@@ -382,6 +418,7 @@
 
  function admissionFailureCode(failure) {
    const reason=String(failure.reason||failure.message||'');
+   if(promptRejection({message:reason,flow:{code:failure.code}},true))return 'PREFLIGHT_REJECTED';
    if(/timeout|timed out|таймаут|не ответил|no transferable|decode|network|transport/i.test(reason))return null;
    if(/Сервис создания изображений недоступен/i.test(reason))return 'FLOW_SERVICE_UNAVAILABLE';
    for(const code of ['ERR_UNSUPPORTED_MODEL','ERR_TOO_MANY_REFS','FLOW_BUSY'])
@@ -402,11 +439,11 @@
    failure.admissionReleased=true;options.save();
    return true;
  }
- const allowedOrigin=origin=>{try{const u=new URL(origin);return u.protocol==='https:'&&(u.hostname.endsWith('.usercontent.goog')||u.hostname.endsWith('.googleusercontent.com')||u.hostname==='flow.google.com');}catch{return false;}};
+ const allowedOrigin=origin=>{try{const u=new URL(origin);return u.protocol==='https:'&&(u.hostname.endsWith('.usercontent.goog')||u.hostname.endsWith('.googleusercontent.com')||u.hostname.includes('flow.google.com'));}catch{return false;}};
  window.addEventListener('message',e=>{
   const m=e.data;if(!m||m.channel!==CHANNEL||!allowedOrigin(e.origin))return;
   if(m.type==='ready'&&!running&&!pending.size){
-   adapterImageConcurrency=Number.isInteger(m.imageConcurrency)?Math.max(1,Math.min(4,m.imageConcurrency)):1;
+   adapterImageConcurrency=Number.isInteger(m.imageConcurrency)?Math.max(1,Math.min(8,m.imageConcurrency)):1;
    const changed=peer!==e.source;peer=e.source;peerOrigin=e.origin;
    if(changed&&!state?.error)tell('Инструмент подключён. Можно запустить ФФ.');
    return;
@@ -418,7 +455,7 @@
    return;
   }
   console.log('[FF Bridge] Received reply from custom tool:', m.type, m);
-  if(m.type==='pong'){adapterImageConcurrency=Number.isInteger(m.imageConcurrency)?Math.max(1,Math.min(4,m.imageConcurrency)):adapterImageConcurrency;clearTimeout(request.timer);const p=request;pending.delete(m.requestId);p.resolve({pong:true});}
+  if(m.type==='pong'){adapterImageConcurrency=Number.isInteger(m.imageConcurrency)?Math.max(1,Math.min(8,m.imageConcurrency)):adapterImageConcurrency;clearTimeout(request.timer);const p=request;pending.delete(m.requestId);p.resolve({pong:true});}
   if(m.type==='source_image_imported'){
    clearTimeout(request.timer);const p=request;pending.delete(m.requestId);
    p.resolve({
@@ -451,7 +488,8 @@
    }else {
     if(p.timedOut&&p.owner?.job?.requestId===m.requestId){
      p.owner.result=result;save();
-     tell('Поздний результат Flow сохранён в мосте. Нажмите продолжение для загрузки в ФФ.');
+     if(!running)void saveLateResult(p.owner);
+     tell(running?'Поздний результат Flow сохранён в мосте. Очередь ещё работает; результат будет проверен при продолжении.':'Поздний результат Flow сохранён в мосте. Нажмите продолжение для загрузки в ФФ.');
     }
     p.resolve(result);
    }
@@ -467,7 +505,7 @@
     scene_revision:m.scene_revision,
     idempotency_key:m.idempotency_key
    };
-   if(p.timedOut&&p.owner?.job?.requestId===m.requestId){p.owner.result=result;save();tell('Поздний результат видео сохранён. Нажмите продолжение для загрузки в ФФ.');}
+   if(p.timedOut&&p.owner?.job?.requestId===m.requestId){p.owner.result=result;save();if(!running)void saveLateResult(p.owner);tell('Поздний результат видео сохранён. Нажмите продолжение для загрузки в ФФ.');}
    p.resolve(result);
   }
   if(m.type==='error'||m.type==='scene_video_error'){
@@ -501,6 +539,19 @@
    }
   }
  });
+ async function saveLateResult(owner,attempt=0){
+  if(running||!owner?.result||!owner?.job)return;
+  try {
+   tell('Поздний результат получен. Автоматически сохраняю его в FrameForge…');
+   await uploadSaved(owner);
+   tell('Поздний результат автоматически сохранён в FrameForge.');
+  } catch(error){
+   if(transientRecoveryError(error)&&attempt<2){
+    tell('Сохранение временно недоступно. Результат в кэше; повторю автоматически.');
+    setTimeout(()=>void saveLateResult(owner,attempt+1),15000*2**attempt);
+   }else tell('Результат сохранён в мосте; загрузка требует внимания: '+error.message);
+  }
+ }
  function videoBridgeJob(job){
   const omni=job.model==='gemini-omni-1.1-flash'||job.engine==='omni_flash'||job.modelDisplayName==='Omni 1.1 Flash';
   return {...job,modelDisplayName:omni?'Omni 1.1 Flash':'Veo 3.1 - Lite',
@@ -650,6 +701,10 @@
       && !(options.batchStage === 'portraits' && kind === 'characters');
     if (kind === 'scenes') {
       if (item.has_image) return { status: 'already_has_image' };
+      const prior=state.failedScenes?.[`scenes:${id}`];
+      if(prior?.sceneRevision===(item.revision||item.current_revision||1)&&
+         promptRejection({message:prior.reason,flow:{code:prior.code}},true)==='policy')
+        return {status:'prompt_rejected',reason:prior.reason};
       if (alreadyDone || state.refs['scenes:' + id]) {
         state.done=state.done.filter(done=>done!==kind+':'+id);
         delete state.refs['scenes:'+id];
@@ -695,7 +750,6 @@
     const allRefs = (item.has_image ? [] : (item.references || []))
       .map((ref, index) => ({ ref, index, priority: refPriority[ref.type] ?? 3 }))
       .sort((a, b) => a.priority - b.priority || a.index - b.index);
-    if (allRefs.length > 5) throw Error(`Кадр ${item.position}: требуется ${allRefs.length} референсов, а подтверждённый профиль поддерживает не более 5. Сцена не отправлена и персонажи не отброшены.`);
 
     const characterRefs = allRefs.filter(item => item.ref.type === 'character');
     const requiresComposite=kind==='scenes'&&allRefs.length>2;
@@ -716,10 +770,10 @@
       } catch(e) {
         console.warn('[FF Bridge] Server composite-reference endpoint unavailable, trying client canvas:', e);
       }
-      if (!comp || !comp.has_composite || !comp.data_url) {
+      if (!comp || !comp.has_composite || !comp.data_url || comp.count!==selectedRefs.length) {
         comp = await createClientCompositeReferenceFn(item, selectedRefs);
       }
-      if (comp && comp.has_composite && comp.data_url) {
+      if (comp && comp.has_composite && comp.data_url && comp.count===selectedRefs.length) {
         const compKey = `composite_ref:${id}:${comp.sha256}`;
         let compMediaId = state.refs[compKey];
         if (!compMediaId) {
@@ -753,6 +807,9 @@
       }
     }
 
+    if (!isCompositeReference && selectedRefs.length>5) {
+      throw Error(`Кадр ${item.position}: не удалось собрать полный составной референс (${selectedRefs.length} сущностей). Результаты сохранены; персонажи не отброшены.`);
+    }
     if (!isCompositeReference) {
       referenceImageMediaIds = [];
       let refImportFailed = false;
@@ -833,7 +890,7 @@
           for(;;){
             if(isPaused()){save();return {status:'paused'};}
             const slot=await api('POST','/api/bridge/v1/admission',{scene_id:id,request_id:state.job.requestId,
-              revision:state.job.scene_revision,prompt:state.job.prompt});
+              revision:state.job.scene_revision,prompt:state.job.admissionPrompt||state.job.prompt});
             if(slot.allowed)break;
             if(Date.now()>=admissionDeadline)throw Error(`Кадр ${item.position}: ${slot.reason||'Нет свободного разрешения Flow.'} Ожидание остановлено, кадр не пропущен.`);
             if(['fail','uncertain','needs_resolution','error_response','error_access','error_request','transport_unknown'].includes(slot.state))throw Error(slot.reason||'Промпт требует решения. Генерация не запущена.');
@@ -848,6 +905,24 @@
         state.job.retryPending = false; state.job.submissionPhase='dispatching'; save();
         state.result = await generateImageFn(state.job,{state,save,tell,generate});
       } catch (error) {
+        const promptFailure=kind==='scenes'&&promptRejection(error);
+        if(promptFailure) {
+          const failed=recordFailedScene(state,state.job,error);
+          await releaseSceneAdmission({api,save},state.job,failed,'PREFLIGHT_REJECTED');
+          const original=state.job.prompt;
+          const compact=promptFailure==='format'?compactRejectedPrompt(original):original;
+          if(compact!==original&&!state.job.formatRetried&&compact.length<=4000&&!isPaused()) {
+            state.job={...state.job,requestId:crypto.randomUUID(),admissionPrompt:original,
+              prompt:compact,formatRetried:true,remoteFailure:null,submissionPhase:'prepared',retryPending:true};
+            state.job.requestProfile=requestProfile(state.job);
+            save();
+            tell(`Кадр ${item.position}: исправляю формат промпта и повторяю один раз.`);
+            continue;
+          }
+          state.job=null;state.result=null;state.error=null;save();
+          tell(`Кадр ${item.position} требует правки промпта. Flow: ${failed.reason}. Продолжаю очередь.`);
+          return {status:'prompt_rejected',reason:failed.reason};
+        }
         const sdkTerminal = error?.flow?.code === 'ERR_GEN_FAILED' || /\bERR_GEN_FAILED\b/i.test(String(error?.message || error));
         if(kind==='characters' && state.job?.casting_generation_id && sdkTerminal){
           await api('POST',`/api/characters/${id}/cast-failed`,{generation_id:state.job.casting_generation_id,request_id:state.job.requestId,reason:String(error?.message||error)});
@@ -942,6 +1017,7 @@
   }
   async function recoverSceneTasks(options) {
     const {state,sceneIds,generationIds,save}=options;
+    const inScope=job=>!generationIds&&(!sceneIds||sceneIds.includes(job.id));
     const recovered=[];
     // v79 could retire a confirmed failure locally without acknowledging its
     // server reservation. Reconcile the durable tombstones, by exact request,
@@ -972,15 +1048,12 @@
         task.job=null;task.result=null;task.error=null;save();
       }
     }
-    if(recovered.length)throw Error(`Кадр ${recovered[0].position}: подтверждён отказ Flow: ${recovered[0].reason}. Старая попытка снята с ожидания; повтор не запускался. Нажмите «Старт / продолжить» для новой попытки.`);
+    const requiresResume=recovered.find(f=>!promptRejection({message:f.reason,flow:{code:f.code}},true));
+    if(requiresResume)throw Error(`Кадр ${requiresResume.position}: подтверждён отказ Flow: ${requiresResume.reason}. Старая попытка снята с ожидания; повтор не запускался. Нажмите «Старт / продолжить» для новой попытки.`);
+    // A scoped run leaves all cached attempts from other scenes available for
+    // a later full run, including images that have already arrived.
     for(const task of Object.values(state.sceneTasks||{})) {
-      if(!task.job)continue;
-      if((sceneIds&&!sceneIds.includes(task.job.id))||generationIds)
-        throw Error('В мосте сохранены незавершённые другие кадры. Сначала сохраните их результаты.');
-    }
-    // Save every known result before stopping on a different unknown request.
-    for(const task of Object.values(state.sceneTasks||{})) {
-      if(!task.job||!task.result)continue;
+      if(!task.job||!task.result||!inScope(task.job))continue;
       const {local}=sceneTaskState(state,{scene_id:task.job.id,revision:task.job.scene_revision});
       try {await options.uploadSavedFn(local);task.error=null;save();}
       catch(error){
@@ -988,17 +1061,22 @@
         task.error=String(error.message||error);save();throw error;
       }
     }
-    for(const task of Object.values(state.sceneTasks||{})) {
-      if(task.job&&!task.result&&!task.job.retryPending&&!task.job.admissionPending)
-        throw Error(`Кадр ${task.job.position||task.job.id}: исход запроса Flow неизвестен. Найдите результат в Flow; автоматический повтор остановлен.`);
+    const uncertain=Object.values(state.sceneTasks||{})
+      .filter(task=>task.job&&inScope(task.job)&&!task.result&&!task.job.retryPending&&!task.job.admissionPending);
+    for(const {job} of uncertain){
+      if(job.admissionEnabled===true&&options.parkUnknownAdmission&&
+         !pending.has(job.requestId))
+        await options.api('POST','/api/bridge/v1/admission/failure',{
+          scene_id:job.id,request_id:job.requestId,code:'RESULT_UNKNOWN'});
     }
+    return uncertain.map(({job})=>({id:job.id,position:job.position,revision:job.scene_revision}));
   }
   async function processScenePool(items,options) {
     const {state,save,tell,isPaused=()=>false}=options;
     const selected=items.filter(item=>!options.sceneIds||options.sceneIds.includes(item.scene_id));
     if(new Set(selected.map(item=>item.scene_id)).size!==selected.length)
       throw Error('В очереди повторяется ID кадра. Генерация не запущена.');
-    const limit=Math.max(1,Math.min(4,options.imageConcurrency||1));
+    const limit=Math.max(1,Math.min(8,options.imageConcurrency||1));
     let cursor=0,firstError=null,active=0;
     const singleReference=(ref,position)=>{
       const key=[state.projectId,state.flowProject,ref.type,ref.asset_id||ref.portrait||ref.environment||ref.prop||ref.id].join(':');
@@ -1028,6 +1106,43 @@
     // rejecting Promise.all against live results that still need to be saved.
     await Promise.all(Array.from({length:Math.min(limit,selected.length)},()=>consume()));
     if(firstError)throw firstError;
+  }
+
+  function referenceTaskState(root,item,kind='props') {
+    root.referenceTasks=root.referenceTasks||{};
+    const key=`${kind}:${item.id}:${item.revision||1}`;
+    const task=root.referenceTasks[key]||(root.referenceTasks[key]={job:null,result:null,error:null});
+    return {local:requestState(root,task),task,key};
+  }
+  async function processReferencePool(items,options) {
+    const {state,save,tell,isPaused=()=>false}=options;
+    const selected=items.filter(item=>!item.locked&&!state.done.includes(`props:${item.id}`));
+    if(new Set(selected.map(item=>item.id)).size!==selected.length)throw Error('В очереди иллюстраций повторяется ID.');
+    const limit=Math.max(1,Math.min(8,options.imageConcurrency||1));
+    let cursor=0,firstError=null,active=0;
+    async function consume(){
+      while(!firstError&&!isPaused()&&cursor<selected.length){
+        const item=selected[cursor++];const {local,task}=referenceTaskState(state,item);
+        let counted=false;
+        try {
+          // A successful upload can be resumed without another provider request.
+          if(task.result&&task.job){await options.uploadSavedFn(local);task.error=null;save();continue;}
+          if(task.job&&!task.result&&!task.job.retryPending&&!['prepared','not_sent'].includes(task.job.submissionPhase)){
+            task.error='Исход отправленного запроса неизвестен. Повтор не отправлялся.';save();
+            tell(`Иллюстрация ${item.name||item.id}: ожидается результат старого запроса; продолжаю остальные.`);continue;
+          }
+          task.error=null;active++;counted=true;save();
+          tell(`ФФ: иллюстраций в работе ${active} / ${limit}; сохранено ${state.done.length}`);
+          await processBridgeItem(item,'props',{...options,state:local});
+        } catch(error){task.error=String(error.message||error);firstError=firstError||error;save();}
+        finally{if(counted)active--;}
+      }
+    }
+    // Always finish and save every request already sent before pausing/updating.
+    await Promise.all(Array.from({length:Math.min(limit,selected.length)},()=>consume()));
+    if(firstError)throw firstError;
+    const unknown=Object.values(state.referenceTasks||{}).filter(t=>t.job&&!t.result&&!t.job.retryPending&&!['prepared','not_sent'].includes(t.job.submissionPhase));
+    if(unknown.length)tell(`Остались неподтверждённые запросы иллюстраций: ${unknown.length}. Они сохранены без повторной отправки.`);
   }
 
   async function processBridgeQueue(options = {}) {
@@ -1061,7 +1176,20 @@
     }
     const readScenes = async () => {
       tell?.('Готовлю промпты сцен в FrameForge…');
-      return (await api('GET', promptsPath)).scenes || [];
+      const scenes=(await api('GET', promptsPath)).scenes||[];
+      const unresolved=options.unresolvedScenes||[];
+      const explicitlySelected=new Set(options.sceneIds||[]);
+      const revisions=new Map(scenes.map(scene=>[scene.scene_id,scene.revision||scene.current_revision]));
+      // A scoped request may explicitly select a newer editorial revision.
+      // Keep the original attempt parked and never replay that revision.
+      const parked=new Set(unresolved.filter(scene=>{
+        const revision=revisions.get(scene.id);
+        return !explicitlySelected.has(scene.id)||!scene.revision||!(revision>scene.revision);
+      }).map(scene=>scene.id));
+      if(parked.size!==unresolved.length){
+        unresolved.splice(0,unresolved.length,...unresolved.filter(scene=>parked.has(scene.id)));
+      }
+      return scenes.filter(scene=>!parked.has(scene.scene_id));
     };
     if(Array.isArray(options.generationIds) && initial.profile_type!=='forgotten_cities'){
       const wanted=new Set(options.generationIds);
@@ -1082,6 +1210,7 @@
       }
       return;
     }
+    const scientific=initial.visual_format==='science_atlas'||(initial.props?.length>0&&initial.props.every(item=>String(item.name||'').startsWith('Атлас / ')));
     const kinds = options.batchStage === 'scenes' ? ['locations', 'props', 'scenes'] : ['characters', 'locations', 'props', 'scenes'];
     for (const kind of kinds) {
       if(isPaused())return;
@@ -1089,6 +1218,7 @@
       const resources = kind === 'scenes' ? await readScenes()
         : kind === 'characters' ? [...(initial.characters || []), ...(initial.manual_characters || [])] : (initial[kind] || []);
       const items = resources.filter(i => kind !== 'props' || !i.importance || i.importance === 'story');
+      if(kind==='props'&&scientific&&options.imageConcurrency>1){await processReferencePool(items,options);continue;}
       if(kind==='scenes'&&options.imageConcurrency>1){await processScenePool(items,options);return;}
       for (const item of items) {
         if (isPaused()) return;
@@ -1256,6 +1386,7 @@
   const keyOf=job=>`${job.direct?job.scene_id:job.source}:${job.scene_revision}:${job.role}`;
   const ticketKey=job=>`${job.scene_id}:${job.scene_revision}`;
   const tickets=direct?(state.directLayerTickets??={}):{};
+  const policyStops=state.layerPolicyStops??={};
   let token=null;
   const post=async body=>{
    if(!token)token=(await api('GET','/api/session')).token;
@@ -1337,6 +1468,13 @@
   for(const [index,planned] of jobs.entries()){
    if(isPaused())return null;
    const item={...planned};
+   const policyStop=policyStops[item.scene_id];
+   if(policyStop?.revision===item.scene_revision){
+    failed.set(item.scene_id,item.position);
+    rejections.push(`кадр ${item.position}: ${policyStop.reason}`);
+    continue;
+   }
+   if(policyStop)delete policyStops[item.scene_id];
    if(failed.has(item.scene_id))continue;
    if(direct&&item.role==='foreground'&&!item.source){
     const plate=plates.get(ticketKey(item));
@@ -1394,19 +1532,33 @@
     catch(error){failed.set(item.scene_id,item.position);rejections.push(`кадр ${item.position}: ${error.message}`);continue;}
     if(isPaused())return null;
    }
-   const job={...item,requestId:newId(),kind:'foreground_layer',id:item.scene_id,referenceImageMediaIds,
+   let job={...item,requestId:newId(),kind:'foreground_layer',id:item.scene_id,referenceImageMediaIds,
     ...(direct?{admission_request_id:ticket}:{}),
     aspectRatio:item.aspect_ratio,modelDisplayName:state.flowImageModel,submissionPhase:'prepared'};
    const task=tasks[key]={job,result:null};save();
    tell(`Слои Flow · ${index+1}/${jobs.length} · кадр ${item.position}: ${item.role==='background'?'чистый фон':direct?'генерирую переднюю сцену':'выделяю переднюю сцену'}…`);
-   try{task.result=await generate(job,'generate',task);save();}
-   catch(error){
+   for(;;){
+    try{task.result=await generate(job,'generate',task);save();break;}
+    catch(error){
+     const rejected=promptRejection(error);
+     const compact=rejected==='format'?compactRejectedPrompt(job.prompt):job.prompt;
+     if(compact!==job.prompt&&!job.formatRetried&&compact.length<=4000&&!isPaused()){
+      job=task.job={...job,requestId:newId(),prompt:compact,formatRetried:true,remoteFailure:null,submissionPhase:'prepared'};
+      save();
+      tell(`Кадр ${item.position}: исправляю формат промпта слоя и повторяю один раз.`);
+      continue;
+     }
     if(!job.remoteFailure&&!confirmedRemoteFailure(error)&&
        !['prepared','not_sent'].includes(job.submissionPhase))
      throw Error(`Кадр ${item.position}: ${error.message} Запрос не будет отправлен повторно. Нажмите «Запустить генерацию в Flow», чтобы продолжить с остальных кадров.`);
     if(direct)await release(job);
-    failed.set(item.scene_id,item.position);delete tasks[key];save();continue;
+     failed.set(item.scene_id,item.position);
+     rejections.push(`кадр ${item.position}: ${error.message}`);
+     if(rejected==='policy')policyStops[item.scene_id]={revision:item.scene_revision,reason:error.message};
+     delete tasks[key];save();break;
+    }
    }
+   if(failed.has(item.scene_id))continue;
    await saveLayer(key,task);
   }
   if(isPaused())return null;
@@ -1419,7 +1571,8 @@
  async function run(sceneIds=null,generationIds=null,imagesOnly=false,batchStage=null,expectedProjectId=null,animationsOnly=false,foregroundPairs=false,directLayers=false) {
   if(running)return;
   if(!peer){tell('Откройте инструмент с адаптером v1');return;}
-  running=true;pauseRequested=false;
+  running=true;pauseRequested=false;progressAt=Date.now();
+  let recoveryFailed=false;
   if(batchStage)tell(batchStage==='portraits'?'Подготовка портретов…':'Подготовка сцен…');
   console.log('[FF Bridge] Running generation queue...');
   try {
@@ -1427,6 +1580,11 @@
    const {project_id}=await api('GET','/api/projects/current');
    if(!project_id)throw Error('В ФФ нет активного проекта');
    if(expectedProjectId && project_id!==expectedProjectId)throw Error('Активный проект ФФ изменился. Повторите запуск из нужного проекта.');
+   const resumeArgs=[sceneIds,generationIds,imagesOnly,batchStage,project_id,animationsOnly,foregroundPairs,directLayers];
+   const recoveryId=recoveryKey(getFlowProjectId());
+   const previousRecovery=GM_getValue(recoveryId,null);
+   GM_setValue(recoveryId,{enabled:true,projectId:project_id,args:resumeArgs,
+     attempts:previousRecovery?.enabled?previousRecovery.attempts||0:0,nextAt:0});
    const montageRevision=foregroundPairs?(await api('GET',`/api/projects/${project_id}/edit`)).revision:null;
    const flowSettings=await api('GET','/api/settings');
    const flowProject=getFlowProjectId();
@@ -1467,7 +1625,12 @@
      tell('Смываю старую ошибку...');
     }
    save();
-   if(!animationsOnly&&batchStage!=='portraits')await recoverSceneTasks({state,sceneIds,generationIds,save,tell,api,uploadSavedFn:uploadSaved});
+   const capabilities=Object.values(state.sceneTasks||{}).some(task=>task.job&&!task.result)
+     ?await api('GET','/api/editorial-capabilities'):{};
+   const unresolvedScenes=!animationsOnly&&batchStage!=='portraits'
+     ?await recoverSceneTasks({state,sceneIds,generationIds,save,tell,api,uploadSavedFn:uploadSaved,
+       parkUnknownAdmission:capabilities.park_unknown_flow_admission===true}):[];
+   if(unresolvedScenes.length)tell(`Сохранены неподтверждённые запросы кадров ${unresolvedScenes.map(s=>s.position||s.id).join(', ')}. Продолжаю остальные кадры.`);
    // A cached rejected image from an earlier browser session must be discarded.
    // The ordinary scene loop below will generate a fresh candidate.
    if(sceneIds&&state.job?.kind==='scenes'&&!sceneIds.includes(state.job.id)){
@@ -1486,7 +1649,7 @@
     } else throw error;
    }
     if(!animationsOnly&&!directLayers)await processBridgeQueue({
-      project_id,
+      project_id,unresolvedScenes,
       sceneIds,
       generationIds,
       batchStage,
@@ -1680,16 +1843,25 @@
      `Слои Flow готовы · сцен в монтаже: ${layerSummary.paired}.${layerSummary.failed.length?` Без пары слоёв: ${layerSummary.failed.join(', ')}.`:''}${layerSummary.rejections[0]?` ${layerSummary.rejections[0]}`:''}`:
      layerSummary.reason);
     else if(unresolvedVideos.length)tell(`Остальные выбранные видео обработаны. Неподтверждённых попыток: ${unresolvedVideos.length} (кадры ${unresolvedVideos.map(t=>t.position||t.scene_id).join(', ')}). Их повтор не запускался; проверьте результаты в Flow.`);
+    else if(unresolvedScenes.length)tell(`Остальная очередь обработана. Проверьте в Flow кадры ${unresolvedScenes.map(s=>s.position||s.id).join(', ')} с неподтверждённым результатом.`);
     else if(batchStage==='portraits')tell('Портреты готовы к проверке. Проверьте их в FrameForge и запустите сцены той же кнопкой.');
-    else tell(generationIds?'Эталон сохранён. Мост подключён и ждёт следующую команду.':'Очередь завершена. Мост подключён и ждёт следующую команду.');
+    else {
+     const rejected=Object.values(state.failedScenes||{}).filter(item=>promptRejection({message:item.reason,flow:{code:item.code}},true));
+     tell(generationIds?'Эталон сохранён. Мост подключён и ждёт следующую команду.':
+      rejected.length?`Очередь завершена. Требуют правки промпта: ${rejected.map(item=>item.position).join(', ')}.`:
+       'Очередь завершена. Мост подключён и ждёт следующую команду.');
+    }
    }else{
     tell('Пауза. Текущий кадр сохранён');
    }
   }catch(e){
+   recoveryFailed=transientRecoveryError(e);
+   if(recoveryFailed)retryRecovery();else stopRecovery();
    console.error('[FF Bridge Error]', e);
    if(state){addDiagnostic(state.job,e);state.error=e.message;save();}
    tell(e.message);
   }finally{
+   if(!recoveryFailed)stopRecovery();
    running=false;
    void heartbeat();
   }
@@ -1705,14 +1877,29 @@
    const response=await api('POST','/api/bridge/v1/heartbeat',{
     project_id,flow_project_id:flowProject,
     adapter_connected:Boolean(peer),running,status:status.textContent,ack_command_id:ackCommandId,
-    adapter_instance_id:adapterInstanceId,script_version:'0.1.93',foreground_parallax:true,foreground_direct:true,scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
+    adapter_instance_id:adapterInstanceId,script_version:'0.1.104',foreground_parallax:true,foreground_direct:true,scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
    });
+   const intent=GM_getValue(recoveryKey(flowProject),null);
+   const recovery=recoveryAction({intent,running,
+     livePending:[...pending.values()].some(request=>!request.timedOut),
+     elapsed:Date.now()-progressAt,now:Date.now()});
+   if(intent?.projectId===project_id&&peer&&!pauseRequested){
+    if(recovery==='reload'&&!watchdogReloading){
+     retryRecovery();watchdogReloading=true;
+     tell('Нет прогресса 7 минут. Состояние сохранено; перезапускаю мост для восстановления.');
+     location.reload();return;
+    }
+    if(recovery==='resume'&&!response.command){
+     tell('Автовосстановление: сначала сохраняю готовые результаты, затем продолжаю очередь.');
+     void run(...intent.args);
+    }
+   }
    const command=response.command;
    if(command&&command.id!==processedCommandId&&command.project_id===project_id
       && !(command.action==='start'&&running)){
     processedCommandId=command.id;ackCommandId=command.id;
     if(command.action==='start')void run(Array.isArray(command.scene_ids)?command.scene_ids:null,Array.isArray(command.generation_ids)?command.generation_ids:null,command.images_only===true,command.batch_stage,command.project_id,command.animations_only===true,command.foreground_pairs===true,command.direct_layers===true);
-    if(command.action==='pause'&&running){pauseRequested=true;tell('Пауза запрошена из ФФ: сохраняю текущий кадр');}
+    if(command.action==='pause'){stopRecovery();if(running)pauseRequested=true;tell('Пауза запрошена из ФФ: сохраняю текущий кадр');}
     if(command.action==='check'){
      tell('Проверяю и привязываю мост к выбранному проекту ФФ...');
      setTimeout(()=>void heartbeat(true),0);
@@ -1726,8 +1913,8 @@
  setInterval(heartbeat,2500);
  void heartbeat();
  check.addEventListener('click',async()=>{
-  if(running)return;
-  if(pending.size){tell('Ожидаются результаты Flow. Сначала сохраните незавершённые запросы.');return;}
+  if(running){tell('Очередь уже работает. Дождитесь сохранения результатов; для остановки нажмите «Пауза».');return;}
+  if([...pending.values()].some(request=>!request.timedOut)){tell('Ожидаются действующие запросы Flow. Повторная генерация не запущена.');return;}
   if(!peer){tell('Адаптер Flow ещё не подключён');return;}
   try{
    await heartbeat(true);
@@ -1737,13 +1924,13 @@
   }catch(e){tell(e.message);}
  });
  start.addEventListener('click',()=>{
-  if(running)return;
-  if(pending.size){tell('Ожидаются результаты Flow. Сначала сохраните незавершённые запросы.');return;}
+  if(running){tell('Очередь уже работает. Дождитесь сохранения результатов; для остановки нажмите «Пауза».');return;}
+  if([...pending.values()].some(request=>!request.timedOut)){tell('Ожидаются действующие запросы Flow. Повторная генерация не запущена.');return;}
   return run();
  });
- pause.addEventListener('click',()=>{if(running){pauseRequested=true;tell('Пауза запрошена: сохраняю текущий кадр');}});
+ pause.addEventListener('click',()=>{stopRecovery();if(running){pauseRequested=true;tell('Пауза запрошена: сохраняю текущий кадр');}});
  reset.addEventListener('click',async()=>{
-  if(running||pending.size||state?.job||state?.result||state?.deferredImageWork||state?.deferredSceneWork||Object.values(state?.foregroundTasks||{}).some(task=>task.result)||Object.values(state?.videoTasks||{}).some(task=>task.job||task.result)||Object.values(state?.sceneTasks||{}).some(task=>task.job||task.result)){tell('Есть незавершённые запросы. Сохраните результаты перед сбросом.');return;}
+  if(running||pending.size||state?.job||state?.result||state?.deferredImageWork||state?.deferredSceneWork||Object.values(state?.foregroundTasks||{}).some(task=>task.result)||Object.values(state?.videoTasks||{}).some(task=>task.job||task.result)||Object.values(state?.sceneTasks||{}).some(task=>task.job||task.result)||Object.values(state?.referenceTasks||{}).some(task=>task.job||task.result)){tell('Есть незавершённые запросы. Сохраните результаты перед сбросом.');return;}
   try{
    const {project_id}=await api('GET','/api/projects/current');
    const flowProject=getFlowProjectId();
@@ -1759,11 +1946,11 @@
     globalThis.FFBridgeQueue = {
       normalizeVideoFlowError,confirmedVideoFailure,videoFailureReason,
       scopeSavedWork,recoverVideoTasks,captureLateVideoResult,
-      getFlowProjectId,
+      getFlowProjectId,recoveryAction,transientRecoveryError,
       sceneTaskState,
       recoverSceneTasks,
       confirmedRemoteFailure,
-      processScenePool,
+      processScenePool,referenceTaskState,processReferencePool,
       ensureReferenceMediaId,
       loadSourceImageDataUrl,
       handleSourceRejection,
@@ -1779,11 +1966,11 @@
     module.exports = {
       normalizeVideoFlowError,confirmedVideoFailure,videoFailureReason,
       scopeSavedWork,recoverVideoTasks,captureLateVideoResult,
-      getFlowProjectId,
+      getFlowProjectId,recoveryAction,transientRecoveryError,
       sceneTaskState,
       recoverSceneTasks,
       confirmedRemoteFailure,
-      processScenePool,
+      processScenePool,referenceTaskState,processReferencePool,
       ensureReferenceMediaId,
       loadSourceImageDataUrl,
       handleSourceRejection,

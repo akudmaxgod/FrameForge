@@ -105,6 +105,21 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertTrue(short['coverage']['below_target'])
         self.assertEqual(short['coverage']['actual_percent'], 10)
 
+    def test_one_library_file_is_selected_only_once_even_with_different_segments(self):
+        doc=document([1000]*4);choices=proposals(doc)
+        for i,p in enumerate(choices):p['candidate_segment']={'item_id':'same','segment_id':str(i),'media_sha256':'identical'}
+        result=select(doc,choices,{'mode':'matched','distribution':'best'})
+        self.assertEqual(result['coverage']['selected_count'],1)
+        self.assertEqual(set(result['skipped'].values()),{'duplicate_material'})
+        choices[1]['candidate_segment']['item_id']='another-import'
+        self.assertEqual(select(doc,choices,{'mode':'matched'})['coverage']['selected_count'],1)
+
+    def test_already_inserted_material_is_not_selected_again(self):
+        doc=document([1000]*3);doc['clips'][0]['footage_overlay']={'media_library_item_id':'used','media_content_sha256':'same','source_kind':'footage','media_type':'image','trim_in_ms':0,'trim_out_ms':1000,'playback_rate':1,'hold_last_ms':0}
+        choices=proposals(doc);choices[1]['candidate_segment']={'item_id':'used'};choices[2]['candidate_segment']={'item_id':'copy','media_sha256':'same'}
+        selected=select(doc,choices,{'mode':'matched'})
+        self.assertNotIn('p1',selected['selected_proposal_ids']);self.assertNotIn('p2',selected['selected_proposal_ids'])
+
     def test_policy_rejects_invalid_values_and_guard_rejects_overfill(self):
         for p in [-1, 101, float('nan'), float('inf'), True, '30']:
             with self.subTest(p=p), self.assertRaises(DomainError):
@@ -142,11 +157,15 @@ class CoverageServiceTests(unittest.TestCase):
         self.item = self.s.media_library.import_file(self.pid, source)
         self.choices = proposals(self.doc)
         for i, p in enumerate(self.choices):
+            item=self.item
+            if i:
+                Image.new('RGB',(160,90),(255,i*30,0)).save(source)
+                item=self.s.media_library.import_file(self.pid,source)
             p.update(scene_id=self.scenes[i]['id'], phrase_quote='Test phrase',
                      insert_start_ms=i*1000,insert_end_ms=(i+1)*1000,
                      narration_origin_clip_id=str(i), candidate_segment={
-                         'item_id': self.item['id'], 'media_type': 'image', 'original_name': 'insert.png',
-                         'file_path':self.item['file_path'],'thumbnail_path':self.item['thumbnail_path']})
+                         'item_id': item['id'], 'media_type': 'image', 'original_name': 'insert.png',
+                         'file_path':item['file_path'],'thumbnail_path':item['thumbnail_path']})
         self.proposal_id = self.record(self.choices)
 
     def record(self, choices):
@@ -178,6 +197,28 @@ class CoverageServiceTests(unittest.TestCase):
         self.assertNotIn('footage_overlay', clips[5])
         restored = self.s.montage_inserts.rollback_proposal(self.pid, proposal)
         self.assertEqual(restored['document']['clips'][3], doc['clips'][3])
+
+    def test_preview_and_apply_accept_a_library_file_only_once(self):
+        choices=copy.deepcopy(self.choices[:2]);choices[1]['candidate_segment']=copy.deepcopy(choices[0]['candidate_segment'])
+        proposal=self.record(choices)
+        preview=self.s.montage_inserts.preview_proposals(self.pid,proposal,{'mode':'matched'})
+        self.assertEqual(len(preview['selected_proposal_ids']),1)
+        result=self.s.montage_inserts.apply_proposals(self.pid,proposal,coverage={'mode':'matched'})
+        self.assertEqual(result['applied_count'],1)
+        overlay=next(c['footage_overlay'] for c in result['document']['clips'] if c.get('footage_overlay'))
+        self.assertEqual(overlay['media_library_item_id'],choices[0]['candidate_segment']['item_id'])
+
+    def test_matching_reserves_each_file_once_and_skips_files_already_inserted(self):
+        segment=self.item['segments'][0]
+        with self.s.db.transaction() as db:db.execute("UPDATE media_segments SET analysis_status='completed' WHERE id=?",(segment['id'],))
+        verified={'status':'matched','status_label':'подходит','reason':'test'}
+        with patch('imagegen.media_matching.evaluate_candidate_alignment',return_value=verified),patch('imagegen.media_matching.calculate_match_score',return_value=.95),patch('imagegen.media_matching.verify_candidate_with_qwen',return_value=verified):
+            proposed=self.s.media_matching.propose_inserts(self.pid,{'coverage':{'mode':'matched'}})
+            self.assertEqual(len(proposed['proposals']),1)
+            applied=self.s.montage_inserts.apply_proposals(self.pid,proposed['proposal_id'],coverage={'mode':'matched'})
+            self.assertEqual(applied['applied_count'],1)
+            again=self.s.media_matching.propose_inserts(self.pid,{'coverage':{'mode':'matched'}})
+            self.assertEqual(again['proposals'],[])
 
     def test_preview_apply_and_rollback_preserve_base_duration_and_audio(self):
         before = self.s.editing.get(self.pid)

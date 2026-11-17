@@ -54,15 +54,48 @@ def snapshot(service,pid,edit):
             'audio_binding':audio_binding(service,pid,edit['document'])}
 
 
-def propose(snap,alignment,policy='hold'):
+def repair_word_timings(alignment):
+    """Keep reliable monotonic acoustic anchors; estimate only gaps between them."""
+    result=copy.deepcopy(alignment);words=result['words'];duration=float(result['audio_duration'])
+    anchors=[];last_end=0.0
+    for index,word in enumerate(words):
+        a,b=word.get('start'),word.get('end')
+        if (word.get('method') in ACOUSTIC and not word.get('number_mismatch')
+                and not word.get('numeric_unresolved') and word.get('confidence',1)>=.55
+                and isinstance(a,(int,float)) and isinstance(b,(int,float))
+                and math.isfinite(a) and math.isfinite(b) and last_end<=a<b<=duration):
+            anchors.append(index);last_end=b
+    repaired=0
+    for left,right in zip([-1]+anchors,anchors+[len(words)]):
+        gap=words[left+1:right]
+        if not gap:continue
+        start=words[left]['end'] if left>=0 else 0.0
+        end=words[right]['start'] if right<len(words) else duration
+        weights=[max(1,len(w.get('text',''))) for w in gap];total=sum(weights);cursor=start
+        for word,weight in zip(gap,weights):
+            stop=cursor+(end-start)*weight/total
+            word.update(start=cursor,end=stop,method='estimated_between_anchors',confidence=0)
+            cursor=stop;repaired+=1
+    result['estimated_words']=repaired
+    result.setdefault('metrics',{})['backwards_word_starts']=0
+    return result
+
+
+def propose(snap,alignment,policy='hold',*,repair=False):
     """Pure calculation: exact quote coverage, one boundary clock, explicit conflicts."""
-    if policy not in ('hold','speed','error'):raise DomainError('Выберите правило для короткого видео.')
+    if policy not in ('hold','speed','error','retime'):raise DomainError('Выберите правило для короткого видео.')
     story=snap['story'];doc=copy.deepcopy(snap['document']);voice=snap['audio_binding']
     if not voice:raise DomainError('Добавьте и включите озвучку в монтаже.')
+    if repair:alignment=repair_word_timings(alignment)
     words=alignment['words'];scenes={s['id']:s for s in snap['scenes']}
     conflicts=[];warnings=[];changes=[]
+    if repair and alignment.get('estimated_words'):
+        warnings.append({'code':'estimated_words','message':f"Время {alignment['estimated_words']} слов восстановлено по соседним опорным словам."})
     def conflict(code,message,clip=None):
-        conflicts.append({'code':code,'message':message,'clip_id':clip})
+        item={'code':code,'message':message,'clip_id':clip}
+        if repair and code in ('uncertain_phrase','uncertain_boundary','number_boundary'):
+            warnings.append(item)
+        else:conflicts.append(item)
     if alignment.get('story_sha256')!=hashlib.sha256(story.encode()).hexdigest():
         raise DomainError('Сопоставление относится к другому сценарию.')
     if alignment.get('metrics',{}).get('backwards_word_starts'):
@@ -129,7 +162,7 @@ def propose(snap,alignment,policy='hold'):
         previous=old[cid];media=c.get('media_type','video')
         fitted=c.get('voice_fit_auto')
         manual=c.get('timing_locked') or c.get('manual_timing') or (
-            not fitted and not c.get('allow_voice_retime') and media!='image' and
+            policy!='retime' and not fitted and not c.get('allow_voice_retime') and media!='image' and
             (c['trim_in_ms']>0 or c['trim_out_ms']<c['source_duration_ms']-.1 or c.get('playback_rate',1)!=1 or c.get('hold_last_ms',0)))
         if manual and (abs(previous['start_ms']-start)>.01 or abs(previous.get('base_end_ms',previous['end_ms'])-end)>.01):
             conflict('manual_boundary','Ручное или закреплённое время не совпадает с фразой. Оно сохранено; снимите фиксацию для новой подгонки.',cid)
@@ -152,7 +185,11 @@ def propose(snap,alignment,policy='hold'):
         else:
             available=c['source_duration_ms']-c['trim_in_ms']
             c['playback_rate']=1;c['hold_last_ms']=0
-            if available>=duration:
+            if policy=='retime':
+                segment=c['trim_out_ms']-c['trim_in_ms']
+                c['playback_rate']=segment/duration;c['hold_last_ms']=0;c['muted']=True
+                if not .05<=c['playback_rate']<=4:conflict('retime_range','Для сохранения всего фрагмента требуется неподходящая скорость. Измените границы исходного видео.',cid);continue
+            elif available>=duration:
                 c['trim_out_ms']=c['trim_in_ms']+duration
             elif policy=='hold':
                 c['trim_out_ms']=c['source_duration_ms'];c['hold_last_ms']=duration-available;c['muted']=True
@@ -161,6 +198,17 @@ def propose(snap,alignment,policy='hold'):
                 c['trim_out_ms']=c['source_duration_ms'];c['playback_rate']=available/duration;c['muted']=True
             else:
                 conflict('short_video','Видео короче фразы. Выберите удержание последнего кадра или допустимую скорость 0.8–1×.',cid);continue
+        if c.get('science_atlas'):
+            c['science_atlas'].setdefault('illustration_motion',{'kind':'push_in','strength':.07})['duration_seconds']=duration/1000
+            c['science_atlas']['cue_timing']='audio_alignment'
+            atlas=c['science_atlas'];support=atlas.get('support_cue_quote','');quote=scene.get('data',{}).get('source_quote','')
+            if support and support in quote:
+                at=scene.get('data',{}).get('source_start',0)+quote.index(support)
+                match=next((w for w in words if w['char_start']<=at<w['char_end'] and w.get('start') is not None),None)
+                if match:atlas['support_reveal_ms']=max(0,offset+match['start']*1000-audio_start-start)
+            c['science_atlas']['cue_ms']=[next((max(0,offset+w['start']*1000-audio_start-start) for w in words
+                if node.get('source_char_start') is not None and w['char_start']<=node['source_char_start']<w['char_end'] and w.get('start') is not None),None)
+                for node in [*c['science_atlas'].get('nodes',[]),*c['science_atlas'].get('elements',[]),*c['science_atlas'].get('annotations',[])]]
         c['voice_fit_auto']=True
         if spans[i]:c['voice_source_binding']=spans[i]
         changes.append({'clip_id':cid,'scene_id':c.get('scene_id'),'quote':(spans[i] or {}).get('quote',''),
@@ -328,11 +376,11 @@ class MontageVoiceFit:
         snap=snapshot(self.service,pid,edit)
         if not snap['audio_binding']:raise DomainError('Загрузите озвучку на дорожку монтажа.')
         policy=data.get('short_video_policy','hold')
-        if policy not in ('hold','speed','error'):raise DomainError('Неизвестное правило короткого видео.')
+        if policy not in ('hold','speed','error','retime'):raise DomainError('Неизвестное правило короткого видео.')
         metadata=self.service.project(pid).get('analysis_metadata') or {}
         if isinstance(metadata,str):metadata=json.loads(metadata)
         mode=data.get('timing_mode') or ('duration_freeze' if metadata.get('prompt_import') else 'phrases')
-        if mode not in ('auto','phrases','duration_freeze','semantic','condense'):raise DomainError('Неизвестный способ подгонки.')
+        if mode not in ('auto','words','phrases','duration_freeze','semantic','condense'):raise DomainError('Неизвестный способ подгонки.')
         if mode=='condense':
             from .montage_condense import prepare
             prepare(snap,data.get('keep_clip_ids'))
@@ -352,6 +400,7 @@ class MontageVoiceFit:
                     raise DomainError('Для этого проекта уже рассчитывается подгонка. Дождитесь результата или отмените её.',409)
             jid=uid();event=threading.Event();self.running[jid]=(pid,event)
             self._write(pid,jid,{'id':jid,'snapshot':snap,'policy':policy,'timing_mode':mode,'keep_clip_ids':data.get('keep_clip_ids'),'status':'queued',
+                                'compute_device':'cuda' if mode in ('words','phrases','semantic','condense') else None,
                                 'stage':'Распределяю стоп-кадры по озвучке' if mode=='duration_freeze' else 'Ожидаю локальное распознавание речи','progress':0})
             threading.Thread(target=self._run,args=(pid,jid,event),daemon=True,name='montage-voice-fit').start()
         return self.get(pid,jid)
@@ -392,7 +441,7 @@ class MontageVoiceFit:
                     if progress.is_file():
                         try:
                             p=json.loads(progress.read_text(encoding='utf-8'));fraction=min(1,p['processed_seconds']/max(1,p['total_seconds']))
-                            self._update(pid,jid,progress=round(fraction*85),stage='Сопоставляю слова с озвучкой на ПК…')
+                            self._update(pid,jid,progress=round(fraction*85),stage='Распознаю речь на видеокарте CUDA и определяю границы кадров. Текущие анимации не изменяются…')
                         except (ValueError,KeyError,OSError):pass
                 if process.returncode:raise DomainError('Не удалось распознать озвучку. Подробности сохранены в журнале проекта.',503)
             finally:
@@ -415,12 +464,16 @@ class MontageVoiceFit:
                 elif value.get('timing_mode')=='semantic':
                     proposal=self.semantic_proposal(pid,jid,snap,event)
                 else:
-                    self._update(pid,jid,status='recognizing',stage='Сопоставляю слова с озвучкой на ПК…')
+                    self._update(pid,jid,status='recognizing',stage='Распознаю речь на видеокарте CUDA и определяю границы кадров. Текущие анимации не изменяются…')
                     asr=self.recognize(pid,jid,snap,event)
                     if event.is_set():raise InterruptedError()
                     from .voice_alignment import build_report
                     alignment=build_report({'project':{'id':pid,'story':snap['story']},'scenes':[]},asr)
-                    proposal=propose(snap,alignment,value['policy'])
+                    proposal=propose(snap,alignment,value['policy'],repair=True)
+                    if value.get('timing_mode')=='words':
+                        proposal['method']='words'
+                        proposal['document']['voice_fit'].update(method='words',phrase_alignment=True,
+                            timing_evidence='local_asr_word_alignment')
                 with self.lock:
                     if event.is_set():raise InterruptedError()
                     self._update(pid,jid,status='ready',progress=100,stage='Предпросмотр готов. Монтаж ещё не изменён.',proposal=proposal)
@@ -453,7 +506,7 @@ class MontageVoiceFit:
 
     def semantic_proposal(self,pid,jid,snap,event):
         from .montage_semantic import clip_texts,speech_units,match,propose
-        self._update(pid,jid,status='recognizing',stage='Получаю временные метки речи на ПК…')
+        self._update(pid,jid,status='recognizing',stage='Получаю временные метки речи на видеокарте CUDA…')
         asset=self.service.asset(snap['audio_binding']['asset_id'])
         if hashlib.sha256((self.service.root/asset['path']).read_bytes()).hexdigest()!=asset['sha256']:
             raise DomainError('Файл озвучки изменился на диске. Загрузите актуальную запись снова.',409)
@@ -485,7 +538,7 @@ class MontageVoiceFit:
     def semantic_embeddings(self,pid,jid,texts,event):
         from .montage_semantic import MODEL_REVISION
         model=self.base/'models/semantic-mini'
-        python=self.base/'backends/voice-venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
+        python=self.base/'.venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
         if not python.is_file() or not (model/'MODEL.json').is_file():
             raise DomainError('Модель смысловой подгонки не установлена. Запустите InstallSemanticFit.ps1.',503)
         spec=json.loads((model/'MODEL.json').read_text(encoding='utf-8'))

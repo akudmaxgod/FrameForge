@@ -1,3 +1,4 @@
+from .gpu_pixels import video_frame as gpu_video_frame, image_from_video as gpu_video_image
 import io
 import os
 from collections import deque
@@ -133,7 +134,7 @@ def calculate_safe_crop(width, height, preset_name='slow_zoom_in',
 
 
 def _ken_burns_sequence(image, preset_name='slow_zoom_in', duration=5.0, fps=24,
-                            target_size=(1280, 720), overscan=0.15, workers=1):
+                            target_size=(1280, 720), overscan=0.15, workers=1, gpu=False):
     """Generate PIL frames for a Ken Burns camera move with guaranteed edge safety."""
     if not isinstance(image, Image.Image):
         image = Image.open(io.BytesIO(image)).convert('RGB')
@@ -143,6 +144,9 @@ def _ken_burns_sequence(image, preset_name='slow_zoom_in', duration=5.0, fps=24,
     if preset_name.startswith('gentle_'):
         overscan = 0
     w, h = image.size
+    if gpu:
+        from .gpu_pixels import CudaImage
+        gpu_source=CudaImage(image)
     crop_info = calculate_safe_crop(w, h, preset_name, overscan=overscan)
     preset = KEN_BURNS_PRESETS[crop_info['actual_preset']]
     base_scale = 1.0 + overscan
@@ -172,6 +176,7 @@ def _ken_burns_sequence(image, preset_name='slow_zoom_in', duration=5.0, fps=24,
         # than the general per-pixel affine transform. A FLOAT source box is
         # essential: an integer crop would quantize slow camera motion into
         # visible jumps. Pillow handles the fractional sampling origin here.
+        if gpu:return gpu_source.resize(target_size,(x1,y1,x2,y2))
         frame = image.resize(target_size, Image.Resampling.BICUBIC,
                              box=(x1, y1, x2, y2))
         return frame
@@ -215,7 +220,7 @@ def _render_ken_burns_video(image_bytes_or_path, output_path, preset_name='slow_
 
     frames, crop_info = _ken_burns_sequence(
         image_bytes, preset_name=preset_name, duration=duration, fps=fps, target_size=target_size,
-        workers=2 if (os.cpu_count() or 1) >= 4 else 1
+        workers=1, gpu=True
     )
 
     written = 0
@@ -228,12 +233,13 @@ def _render_ken_burns_video(image_bytes_or_path, output_path, preset_name='slow_
         stream.width = target_size[0]
         stream.height = target_size[1]
         stream.pix_fmt = 'yuv420p'
-        stream.options = ({'preset':'p4','cq':'20','rc':'vbr','b':'0'} if encoder=='h264_nvenc' else {'crf':'20','preset':'veryfast'})
+        stream.bit_rate = 4000000
+        stream.options = ({'preset':'p4','cq':'20','rc':'vbr','b':'4000000'} if encoder=='h264_nvenc' else {'crf':'20','preset':'veryfast'})
 
         try:
             for pil_frame in frames:
                 written += 1
-                frame = av.VideoFrame.from_image(pil_frame)
+                frame = gpu_video_frame(pil_frame)
                 for packet in stream.encode(frame):
                     container.mux(packet)
             for packet in stream.encode():
@@ -249,7 +255,8 @@ def _render_ken_burns_video(image_bytes_or_path, output_path, preset_name='slow_
         'duration': duration,
         'fps': fps,
         'frames': written,
-        'renderer_version': 4,
+        'renderer_version': 5,
+        'compute_device': 'cuda',
         'encoder': encoder,
         'safe_crop': crop_info
     }
@@ -261,31 +268,6 @@ _gpu_slots = __import__('threading').BoundedSemaphore(2)
 
 def render_ken_burns_video(image_bytes_or_path, output_path, preset_name='slow_zoom_in',
                            duration=5.0, fps=24, target_size=(1280,720)):
-    """Prefer NVENC; retain a software path on machines without NVIDIA."""
-    global _gpu_available
-    args=(image_bytes_or_path,output_path,preset_name,duration,fps,target_size)
+    """CUDA camera transforms and NVENC only; failures stay explicit."""
     with _gpu_slots:
-        if _gpu_available is None:
-            with _gpu_lock:
-                if _gpu_available is None:
-                    # Probe the encoder independently of the user's source.
-                    import tempfile
-                    try:
-                        with tempfile.TemporaryDirectory() as directory:
-                            p=Path(directory)/'probe.mp4'
-                            with av.open(str(p),'w') as c:
-                                stream=c.add_stream('h264_nvenc',rate=24)
-                                stream.width=256;stream.height=256;stream.pix_fmt='yuv420p'
-                                for packet in stream.encode(av.VideoFrame.from_image(Image.new('RGB',(256,256)))):c.mux(packet)
-                                for packet in stream.encode():c.mux(packet)
-                        _gpu_available=True
-                    except Exception:
-                        _gpu_available=False
-        if _gpu_available:
-            try:
-                return _render_ken_burns_video(*args,encoder='h264_nvenc')
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception('NVENC render failed; retrying local clip with software encoder')
-        return _render_ken_burns_video(*args,encoder='libx264')
-
+        return _render_ken_burns_video(image_bytes_or_path,output_path,preset_name,duration,fps,target_size,encoder='h264_nvenc')

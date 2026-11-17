@@ -124,14 +124,14 @@ export default function App() {
       try { window.top?.postMessage(payload, HOST); } catch (e) {}
       try { window.parent?.postMessage(payload, HOST); } catch (e) {}
     };
-    const ready = () => send({ type: 'ready', protocolVersion: 2, imageConcurrency: 4 });
+    const ready = () => send({ type: 'ready', protocolVersion: 2, imageConcurrency: 8 });
     const handleMessage = async (event: MessageEvent) => {
       const rawMessage = event.data;
       if (event.source !== window.top || event.origin !== HOST || !rawMessage || rawMessage.channel !== CHANNEL) return;
       const m = { ...rawMessage, referenceImageMediaIds: Array.isArray(rawMessage.referenceImageMediaIds) ? [...rawMessage.referenceImageMediaIds] : rawMessage.referenceImageMediaIds };
       addLog('in', `${m.type} [${m.requestId || 'no-id'}]`, m);
       if (m.type === 'ping') {
-        send({ type: 'pong', requestId: m.requestId, protocolVersion: 2, imageConcurrency: 4 });
+        send({ type: 'pong', requestId: m.requestId, protocolVersion: 2, imageConcurrency: 8 });
         return;
       }
       if (['generate', 'import_source_image', 'scene_video', 'scene_video_start'].includes(m.type)) {
@@ -151,7 +151,7 @@ export default function App() {
           send({ ...cached, type: 'source_image_imported', requestId: m.requestId });
           return;
         }
-        if (busyRef.current || activeRequestsRef.current.size >= 4) {
+        if (busyRef.current || activeRequestsRef.current.size >= 8) {
           send({ type: 'error', requestId: m.requestId, error: 'Инструмент занят', code: 'FLOW_BUSY' });
           return;
         }
@@ -226,13 +226,13 @@ export default function App() {
         addLog('info', `Served cached result for ${m.requestId}`);
         return;
       }
-      if (busyRef.current || activeRequestsRef.current.size >= 4 || (isVideo && activeRequestsRef.current.size > 0)) {
+      if (busyRef.current || activeRequestsRef.current.size >= 8 || (isVideo && activeRequestsRef.current.size > 0)) {
         send({ type: 'error', requestId: m.requestId, error: 'Инструмент занят', code: 'FLOW_BUSY' });
         return;
       }
       if (isVideo) busyRef.current = true;
       activeRequestsRef.current.set(m.requestId, isVideo ? 'video' : 'image');
-      send({ type: 'diagnostic', requestId: m.requestId, phase: 'request_started', activeCount: activeRequestsRef.current.size, imageConcurrency: 4 });
+      send({ type: 'diagnostic', requestId: m.requestId, phase: 'request_started', activeCount: activeRequestsRef.current.size, imageConcurrency: 8 });
       setIsGenerating(true);
       try {
         if (isVideo) {
@@ -378,7 +378,7 @@ export default function App() {
         activeRequestsRef.current.delete(m.requestId);
         if (isVideo) busyRef.current = false;
         setIsGenerating(activeRequestsRef.current.size > 0 || busyRef.current);
-        send({ type: 'diagnostic', requestId: m.requestId, phase: 'request_finished', activeCount: activeRequestsRef.current.size, imageConcurrency: 4 });
+        send({ type: 'diagnostic', requestId: m.requestId, phase: 'request_finished', activeCount: activeRequestsRef.current.size, imageConcurrency: 8 });
       }
     };
     window.addEventListener('message', handleMessage);
@@ -465,7 +465,7 @@ export default function App() {
         <main className="flex-1 flex flex-col relative bg-[#0f0f12]">
           <div className="flex border-b border-white/5 bg-black/20 p-1 m-4 self-start rounded-xl text-[10px]">
              <div className="px-3 py-1 text-slate-500 font-mono tracking-tighter">
-               BRIDGE_V1.2 · IMAGES ×4
+               BRIDGE_V1.2 · IMAGES ×8
              </div>
           </div>
           <div className="flex border-b border-white/5 bg-black/20 p-1 m-4 mt-0 self-start rounded-xl">

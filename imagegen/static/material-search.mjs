@@ -132,11 +132,21 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
     scenarioPanel.hidden = true;
   };
 
-  scenarioTabBtn.onclick = () => {
+  scenarioTabBtn.onclick = async () => {
     scenarioTabBtn.classList.add('active');
     browseTabBtn.classList.remove('active');
     browsePanel.hidden = true;
     scenarioPanel.hidden = false;
+    if (!currentPlan) {
+      try {
+        const saved = await api(`/projects/${projectId}/material-search/pixabay-latest`);
+        if (saved.plan && !currentPlan) {
+          currentPlan = saved.plan;
+          renderPlanSection();
+          if (saved.job) { activeJobId = saved.job.id; startJobPolling(activeJobId); }
+        }
+      } catch (e) { notice(e.message, true); }
+    }
   };
 
   // --- TAB 1: MANUAL IMAGE SEARCH AND IMPORT ---
@@ -479,7 +489,25 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
     }
   }, 'btn-sm primary');
 
-  scopeBox.append(provGroup, universeGroup, planBtn);
+  const pixabayType = node('select', null, 'material-search-select');
+  for (const [value, label] of [['both', 'Фото и видео'], ['video', 'Только видео'], ['photo', 'Только фото']]) {
+    const option = node('option', label); option.value = value; pixabayType.append(option);
+  }
+  const pixabayAutoBtn = button('✨ Подобрать вставки Pixabay по сценарию', async () => {
+    pixabayAutoBtn.disabled = true;
+    try {
+      currentPlan = await api(`/projects/${projectId}/material-search/plans`, {
+        options: { pixabay_scenario: true, pixabay_media_type: pixabayType.value, preferred_providers: ['pixabay'] }
+      }, 'POST');
+      renderPlanSection();
+      const job = await api(`/projects/${projectId}/material-search/jobs`, { plan_id: currentPlan.plan_id, providers: ['pixabay'] }, 'POST');
+      activeJobId = job.job_id || job.id;
+      startJobPolling(activeJobId);
+    } catch (e) { notice(e.message, true); }
+    finally { pixabayAutoBtn.disabled = false; }
+  }, 'btn-sm primary');
+  const pixabayInfo = node('p', 'До 4 тем сценария, до 8 поисковых запросов. Без DeepSeek. Результаты привязываются к фразам без повторов; скачивание — после выбора.', 'material-search-label');
+  scopeBox.append(pixabayAutoBtn, pixabayType, pixabayInfo, provGroup, universeGroup, planBtn);
   scenarioPanel.append(scopeBox);
 
   // Dynamic containers
@@ -603,7 +631,7 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
           plan_id: currentPlan.plan_id,
           providers: selectedProviders
         }, 'POST');
-        activeJobId = jobRes.job_id;
+        activeJobId = jobRes.job_id || jobRes.id;
         startJobPolling(activeJobId);
       } catch (e) {
         notice(e.message, true);
@@ -629,7 +657,7 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
           renderResults(candRes.candidates || []);
         } else if (job.state === 'failed' || job.state === 'cancelled') {
           clearInterval(pollTimer);
-          notice(`Задача поиска ${job.state === 'cancelled' ? 'отменена' : 'завершена с ошибкой: ' + (job.error || '')}`, true);
+          notice(`Задача поиска ${job.state === 'cancelled' ? 'отменена' : 'завершена с ошибкой: ' + (job.error_message || job.error || '')}`, true);
         }
       } catch (e) {
         clearInterval(pollTimer);

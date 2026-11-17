@@ -12,7 +12,7 @@ export function FrameForgeBridge() {
     let exclusive = false;
     const completed = new Map<string, unknown>();
     const send = (message: object) => window.top?.postMessage({channel: CHANNEL, ...message}, HOST);
-    const ready = () => send({type:'ready', protocolVersion:2, imageConcurrency:4});
+    const ready = () => send({type:'ready', protocolVersion:2, imageConcurrency:8});
 
     // The SDK has used more than one response shape over time.  Keep that
     // compatibility at the bridge boundary, so FrameForge only ever receives
@@ -73,7 +73,7 @@ export function FrameForgeBridge() {
       if (event.origin !== HOST || event.source !== window.top || m?.channel !== CHANNEL) return;
 
       if (m.type === 'ping') {
-        send({type:'pong', requestId:m.requestId, protocolVersion:2, imageConcurrency:4});
+        send({type:'pong', requestId:m.requestId, protocolVersion:2, imageConcurrency:8});
         return;
       }
 
@@ -107,7 +107,7 @@ export function FrameForgeBridge() {
 
       const isVideo = m.kind === 'scene_video' || m.type === 'scene_video_start';
       if(active.has(m.requestId))return;
-      if (exclusive || active.size >= 4 || (isVideo && active.size > 0)) {
+      if (exclusive || active.size >= 8 || (isVideo && active.size > 0)) {
         send({type: 'error', requestId: m.requestId, error:'Инструмент занят', code:'FLOW_BUSY'});
         if (m.kind === 'scene_video' || m.type === 'scene_video_start') {
           send({type: 'scene_video_error', requestId: m.requestId, scene_id: m.scene_id || m.id, error:'Инструмент занят', code:'FLOW_BUSY'});

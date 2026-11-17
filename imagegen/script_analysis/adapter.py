@@ -180,8 +180,20 @@ def export_to_app_analysis(
         # does not demote characters referred to by role, surname or pronouns.
         physical, depicted, mentioned = [], [], []
         full_scene_text = f"{s.heading}. {s.summary}. {quote}".casefold()
+        from ..entity_identity import mentions as identity_mentions, reported_content
+        registry_people = [{'name': c.name, 'aliases': c.aliases} for c in registry.characters]
+        report_spans = reported_content(quote)
+        source_mentions = identity_mentions(quote, registry_people) if report_spans else []
+        topics = {index for index, start, _ in source_mentions
+                  if any(begin <= start < stop for _, begin, stop, _ in report_spans)}
+        physical_mentions = {index for index, start, _ in source_mentions
+                             if not any(begin <= start < stop for _, begin, stop, _ in report_spans)}
+        reported_only = {registry_people[index]['name'] for index in topics - physical_mentions}
 
         for name in scene_char_names:
+            if name in reported_only:
+                mentioned.append(name)
+                continue
             c = next(c for c in registry.characters if c.name == name)
             aliases = [c.name, *c.aliases]
             stems = []

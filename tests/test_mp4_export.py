@@ -55,7 +55,7 @@ class Mp4ExportTests(unittest.TestCase):
                 with self.assertRaisesRegex(DomainError,'обновите анимацию.*4'):service.assemble_animation_timeline('p')
 
     def test_http_assembly_and_download_returns_playable_mp4(self):
-        from tests.veo_fixture import TestVeoAnimationPlan
+        from tests.test_veo_animation import TestVeoAnimationPlan
         fixture=TestVeoAnimationPlan();fixture.setUp()
         server=None
         try:

@@ -1241,3 +1241,5 @@ body:has(.animation-completion) .animation-budget{display:flex}
 @media(max-width:700px){.project-manager-dialog>header,.project-manager-body{padding:14px}.manager-project-row{align-items:flex-start;flex-direction:column;gap:12px}.manager-row-actions{width:100%;justify-content:flex-end}.manager-cache-actions>strong{width:100%}.project-delete-link{font-size:10px!important}.project-manager-tabs{padding:10px 14px}}
 
 .project-manager-dialog .manager-cache-group{margin:0}
+
+.scene-animation-control,.scene-action-description{min-width:0;max-width:100%;box-sizing:border-box}.scene-animation-control strong,.scene-animation-control p,.scene-narration-binding{overflow-wrap:anywhere;max-width:100%;min-width:0}

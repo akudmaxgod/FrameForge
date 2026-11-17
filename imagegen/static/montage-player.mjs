@@ -1,4 +1,6 @@
+import {drawScienceAtlas} from './montage-science-atlas.mjs';
 import {drawForeground} from './montage-foreground.mjs';
+import {drawEffects} from './montage-effects.mjs';
 import {normalize,opacity,audioGain,sourceSeconds,cameraBox,whiteFade} from './montage-timeline.mjs';
 
 function waitMedia(media,event,ready){
@@ -18,6 +20,9 @@ export class MontagePlayer{
     this.stills=Array.from({length:2},()=>{const canvas=document.createElement('canvas');canvas.width=1280;canvas.height=720;canvas.style.visibility='hidden';stage.append(canvas);return {canvas,asset:null,image:null};});
     this.audio=Array.from({length:2},()=>{const a=document.createElement('audio');a.preload='metadata';a.hidden=true;stage.append(a);return a;});
     this.whiteCover=document.createElement('div');this.whiteCover.style.cssText='position:absolute;inset:0;background:white;opacity:0;z-index:50;pointer-events:none';stage.append(this.whiteCover);
+    this.effectsCanvas=document.createElement('canvas');this.effectsCanvas.width=1280;this.effectsCanvas.height=720;
+    this.effectsCanvas.style.cssText='visibility:hidden;z-index:51;pointer-events:none';
+    stage.append(this.effectsCanvas);
   }
   get duration(){return Math.max(this.timeline?.duration_ms||0,...(this.doc?.audio_tracks||[]).filter(a=>a.enabled!==false).map(a=>(a.offset_ms||0)+a.trim_out_ms-a.trim_in_ms));}
   setDocument(doc){this.pause();this.doc=structuredClone(doc);this.timeline=normalize(doc);this.seek(Math.min(this.time,this.duration));}
@@ -39,6 +44,7 @@ export class MontagePlayer{
   }
   async prepareNow(time,force=false){
     const clips=this.timeline.clips.filter(c=>c.start_ms<=time&&time<c.end_ms);
+    drawEffects(this.effectsCanvas,clips.length?this.doc.visual_effects:undefined,Math.floor(time*24/1000));
     this.whiteCover.style.opacity=String(Math.max(0,...clips.map(c=>whiteFade(c,time))));
     const assignments=[];
     const used=new Set();
@@ -65,7 +71,8 @@ export class MontagePlayer{
         }
         if(still.asset!==c.source_image_asset_id){const image=new Image();image.src='/api/assets/'+c.source_image_asset_id;await image.decode();still.image=image;still.asset=c.source_image_asset_id;}
         const image=still.image,canvas=still.canvas,ctx=canvas.getContext('2d');ctx.fillStyle='black';ctx.fillRect(0,0,canvas.width,canvas.height);
-        if(c.foreground_effect)await drawForeground(ctx,still,c,image,seconds,v);
+        if(c.science_atlas){const atlas={...c.science_atlas,illustration_motion:{...(c.science_atlas.illustration_motion||{strength:.07}),duration_seconds:c.base_duration_ms/1000}};await drawScienceAtlas(ctx,still,atlas,(time-c.start_ms)/1000);}
+        else if(c.foreground_effect)await drawForeground(ctx,still,c,image,seconds,v);
         else if(c.camera_motion){const box=cameraBox(image.naturalWidth,image.naturalHeight,c.camera_motion,sourceSeconds(c,time)/Math.max(1/24,((c.camera_motion_total_ms||c.base_duration_ms)-(c.hold_last_ms||0))/1000-1/24));ctx.drawImage(image,box.x,box.y,box.w,box.h,0,0,canvas.width,canvas.height);}
         else{const scale=(c.framing==='fill'?Math.max:Math.min)(canvas.width/image.naturalWidth,canvas.height/image.naturalHeight),w=image.naturalWidth*scale,h=image.naturalHeight*scale;ctx.drawImage(image,(canvas.width-w)/2,(canvas.height-h)/2,w,h);}
         canvas.style.visibility='visible';canvas.style.zIndex=String(i+1);canvas.style.opacity=String(opacity(c,time));return;

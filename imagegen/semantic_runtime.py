@@ -10,15 +10,24 @@ def write(path,data):
 def encode(texts,model_path,progress=None):
     import numpy as np
     import onnxruntime as ort
+    from imagegen.gpu_runtime import prepare_dlls
+    prepare_dlls()
+    ort.preload_dlls()
     from tokenizers import Tokenizer
     spec=json.loads((model_path/'MODEL.json').read_text(encoding='utf-8'))
+    if 'quant' in spec['file'].lower():raise RuntimeError('Для CUDA установите полную смысловую модель через InstallGPU.ps1.')
     tokenizer=Tokenizer.from_file(str(model_path/'tokenizer.json'))
     tokenizer.enable_truncation(max_length=128,stride=16)
     pad=tokenizer.token_to_id('<pad>')
     if pad is None:pad=tokenizer.token_to_id('[PAD]')
     if pad is None:raise ValueError('Tokenizer has no pad token.')
-    options=ort.SessionOptions();options.intra_op_num_threads=4;options.inter_op_num_threads=1
-    session=ort.InferenceSession(str(model_path/spec['file']),sess_options=options,providers=['CPUExecutionProvider'])
+    options=ort.SessionOptions();options.intra_op_num_threads=1;options.inter_op_num_threads=1
+    options.log_severity_level=3
+    if 'CUDAExecutionProvider' not in ort.get_available_providers():raise RuntimeError('CUDA для смыслового сопоставления недоступна.')
+    session=ort.InferenceSession(str(model_path/spec['file']),sess_options=options,providers=['CUDAExecutionProvider'])
+    session.disable_fallback()
+    if session.get_providers()[0]!='CUDAExecutionProvider':raise RuntimeError('Смысловая модель не запущена на CUDA.')
+    # Tensor shape bookkeeping stays on the host; neural matrix operations use CUDA.
     chunks=[]
     for i,text in enumerate(texts):
         if not isinstance(text,str) or not text.strip() or len(text)>20000:raise ValueError('Invalid semantic input text.')

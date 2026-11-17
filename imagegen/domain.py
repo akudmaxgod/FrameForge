@@ -564,6 +564,8 @@ def extract_scene_episodic_roles(scene, known_names=()) -> List[str]:
     """Extract concrete episodic/background human roles described in the scene,
     merging explicit episodic_people / background_roles with roles extracted from text."""
     from .cast import stem_ru_word
+    if scene.get('compact_staging'):
+        return list(dict.fromkeys(scene.get('episodic_people') or []))
     roles = []
     for key in ('episodic_people', 'background_roles'):
         explicit = scene.get(key)
@@ -599,7 +601,9 @@ def extract_scene_episodic_roles(scene, known_names=()) -> List[str]:
             and sorted(int(m.group(1)) for m in slots)==list(range(1,declared+1))):
         return roles
 
-    text = ' '.join(str(scene.get(key, '')) for key in ('source_quote', 'beat', 'shot', 'composition'))
+    from .entity_identity import visual_reporting_action
+    fields = ('beat', 'shot', 'composition') if (scene.get('storyboard_frame') or {}).get('reported_content') else ('source_quote', 'beat', 'shot', 'composition')
+    text = ' '.join(visual_reporting_action(str(scene.get(key, '') or '')) for key in fields)
     lowered = text.casefold()
     names = [name.casefold() for name in known_names if isinstance(name, str) and len(name.strip()) > 1]
     for match in _EXPLICIT_UNBOUND_PERSON_CUE.finditer(text):
@@ -648,6 +652,8 @@ def visual_source_evidence(source_quote):
         return ''
     # Quoted dialogue makes compact diffusion models attempt captions. The
     # narrative around it still anchors a repaired/expanded shot in the story.
+    from .entity_identity import visual_reporting_action
+    source_quote = visual_reporting_action(source_quote)
     without_quotes = re.sub(r'[«"](?:[^»"]*)[»"]', '', source_quote)
     without_speech_lines = re.sub(r'(?m)^\s*[—-].*$', '', without_quotes)
     return ' '.join(without_speech_lines.split())[:1000]
@@ -2117,6 +2123,9 @@ def validate_analysis(data, story):
                 raise DomainError(f'Неизвестная одежда "{outfit}" для персонажа {name}')
 
         # Unified Scene Presence Contract
+        if scene.get('compact_staging'):
+            from .subject_policy import normalize_scene
+            scene.update(normalize_scene(scene, characters))
         contract = resolve_scene_presence_contract(
             scene, characters, locations, story=story_clean,
             previous_contract=prev_contract,
@@ -2595,7 +2604,8 @@ def compile_prompt(project, scene, characters, locations=(), props=(), allow_unl
         lines.append(f"Reference image {index}: Prop {prop['name']}. Preserve this object's exact design: {prop['description']}. "
                      "Maintain its defining shape, material, proportions, colors and unique details from the reference image.")
 
-    beat = scene.get('beat', '')
+    from .entity_identity import visual_reporting_action
+    beat = visual_reporting_action(scene.get('beat') or '')
     for c in characters:
         name = c.get('name', '')
         if not name:
@@ -2953,7 +2963,8 @@ def compile_flow_prompt(project, scene, characters=(), locations=(), props=(), c
                 parts.append(f"{primary_style}, cinematic photography")
 
     # 2. Scene beat / narrative action
-    beat = (scene.get('beat') or '').strip()
+    from .entity_identity import visual_reporting_action
+    beat = visual_reporting_action((scene.get('beat') or '').strip())
     beat = re.sub(r'[\x00-\x1f\x7f-\x9f\ufffd]', '', beat).strip()
     beat = literal_animal_wording(beat)
     beat = sanitize_flow_shot_description(beat)
@@ -3495,6 +3506,9 @@ def validate_project_preflight(project_or_data: Dict[str, Any], story: Optional[
                 })
 
         # Unified Scene Presence Contract
+        if scene.get('compact_staging'):
+            from .subject_policy import normalize_scene
+            scene.update(normalize_scene(scene, characters))
         contract = resolve_scene_presence_contract(
             scene, characters, locations, story=story_clean,
             previous_contract=prev_contract,

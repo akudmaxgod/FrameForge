@@ -23,6 +23,20 @@ def legacy_bridge_prompt(prompt):
     return prompt
 
 
+def numbered_prompts(source):
+    """Recognize an entire numbered bracket sequence, preserving every block."""
+    matches=list(re.finditer(r'\[(\d{1,4})\.\s+',source))
+    if not matches or source[:matches[0].start()].strip():
+        raise DomainError('Ожидаются сцены [001. Промпт] [002. Промпт]. Текст не обрезан.')
+    parts=[]
+    for i,match in enumerate(matches):
+        block=source[match.start():matches[i+1].start() if i+1<len(matches) else len(source)].strip()
+        if int(match[1])!=i+1 or not block.endswith(']') or not block[match.end()-match.start():-1].strip():
+            raise DomainError('Проверьте последовательную нумерацию и скобки сцен: [001. Промпт] [002. Промпт]. Текст не обрезан.')
+        parts.append(block)
+    return parts
+
+
 def parse(text, separator='paragraphs'):
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
         raise DomainError('Выберите непустой TXT с промптами до 4 миллионов символов.')
@@ -31,9 +45,12 @@ def parse(text, separator='paragraphs'):
     if re.match(r'^\s*\[\s*(?:\{|\])',text):
         return [item['prompt'] for item in parse_bundle(text,separator)]
     source = text.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
-    if separator not in ('paragraphs', 'lines'):
+    if separator not in ('paragraphs', 'lines', 'numbered'):
         raise DomainError('Выберите разделитель промптов.')
-    parts = re.split(r'\n[\t ]*\n(?:[\t ]*\n)*', source) if separator == 'paragraphs' else source.split('\n')
+    if separator == 'numbered' or (separator == 'paragraphs' and re.match(r'^\s*\[0*1\.\s+',source)):
+        parts = numbered_prompts(source)
+    else:
+        parts = re.split(r'\n[\t ]*\n(?:[\t ]*\n)*', source) if separator == 'paragraphs' else source.split('\n')
     prompts = [p.strip() for p in parts if p.strip()]
     if not 1 <= len(prompts) <= MAX_SCENES:
         raise DomainError(f'В файле должно быть от 1 до {MAX_SCENES} промптов.')

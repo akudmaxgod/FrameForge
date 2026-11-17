@@ -1,0 +1,12 @@
+from pathlib import Path
+p=Path('integrations/flow-v1/frameforge-flow.user.js')
+s=p.read_text(encoding='utf-8-sig')
+s=s.replace("const pause=document.createElement", "const check=document.createElement('button');check.textContent='Проверить связь';\n const pause=document.createElement")
+s=s.replace('root.append(status,start,pause)', 'root.append(status,check,start,pause)')
+s=s.replace("if(m.type==='result'){", "if(m.type==='pong'){clearTimeout(pending.timer);const p=pending;pending=null;p.resolve({pong:true});}\n  if(m.type==='result'){")
+s=s.replace("function generate(job) {", "function generate(job,type='generate') {")
+s=s.replace("type:'generate',...job", "type,...job")
+s=s.replace(" start.addEventListener('click',run);", " check.addEventListener('click',async()=>{if(running||pending)return;if(!peer){tell('Адаптер Flow ещё не подключён');return;}try{await generate({requestId:crypto.randomUUID()},'ping');const current=await api('GET','/api/projects/current');tell('Связь Flow ↔ мост ↔ ФФ проверена. Проект: '+(current.project_id||'не выбран'));}catch(e){tell(e.message);}});\n start.addEventListener('click',run);")
+s=s.replace('if(running)return;', 'if(running||pending)return;')
+p.write_text(s,encoding='utf-8')
+Path('imagegen/static/frameforge-flow-v1.user.js').write_text(s,encoding='utf-8')

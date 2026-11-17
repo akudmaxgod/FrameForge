@@ -76,6 +76,14 @@ def source_window(service,candidate,duration_ms,inspect=True):
 
 def apply_full_segments(service,pid,proposal_id,proposals,current,coverage=None):
     before=copy.deepcopy(current['document']);doc=copy.deepcopy(before)
+    from .media_single_use import tokens,used_in_project
+    reserved=used_in_project(service,pid,before)
+    for proposal in proposals:
+        candidate=proposal.get('candidate_segment') or {}
+        item=service.db.one('SELECT sha256,file_path FROM media_library_items WHERE id=? AND project_id=?',(candidate.get('item_id'),pid)) if candidate.get('item_id') else None
+        identity=tokens(candidate)|tokens(item or {})
+        if identity & reserved:raise DomainError('Этот материал уже используется в ролике. Один файл можно вставить только один раз.',409)
+        reserved.update(identity)
     if before.get('voice_fit',{}).get('stale'):raise DomainError('Подгонка к озвучке устарела. Обновите её перед вставкой.',409)
     originals={c['edit_clip_id']:c for c in before['clips']};order=list(originals);replacements={};consumed=set();records=[];edges={}
     from .insert_coverage import ensure_unanimated, assert_budget
@@ -86,6 +94,7 @@ def apply_full_segments(service,pid,proposal_id,proposals,current,coverage=None)
     target_clips = [c for c in before['clips'] if c['edit_clip_id'] in target_ids]
     ensure_unanimated(service, pid, target_clips, coverage)
     for p in proposals:
+        item=None
         ids=p.get('replace_clip_ids') or [p['edit_clip_id']]
         if any(i not in originals or i in consumed for i in ids):raise DomainError('Сегменты монтажа изменились. Пересчитайте подбор.',409)
         index=order.index(ids[0])
@@ -116,6 +125,9 @@ def apply_full_segments(service,pid,proposal_id,proposals,current,coverage=None)
                          'media_type':'image' if image else 'video','source_image_asset_id':aid if image else None,
                          'source_video_asset_id':None if image else aid,'source_scene_revision':0,'trim_in_ms':start,'trim_out_ms':start+duration,
                          'playback_rate':1,'hold_last_ms':0,'muted':True,'illustrative':True,'framing':p.get('framing','fit')}
+        if p.get('candidate_segment'):
+            replacement['media_library_item_id']=p['candidate_segment'].get('item_id')
+            replacement['media_content_sha256']=item.get('sha256') if item else None
         replacement['placement_policy']=POLICY
         replacement['placement_mode']='automatic'
         animate_photo(service, pid, replacement, photo_motion, len(records))

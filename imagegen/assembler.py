@@ -1,3 +1,5 @@
+from .gpu_pixels import video_frame as gpu_video_frame, image_from_video as gpu_video_image
+from .gpu_pixels import blend as gpu_blend
 from collections import deque
 from fractions import Fraction
 import math
@@ -13,7 +15,8 @@ except ImportError:
 
 def _clip_frames(path, fps, target_size):
     """Resample by presentation time, retaining adjacent input frames only."""
-    with av.open(str(path)) as container:
+    from av.codec.hwaccel import HWAccel
+    with av.open(str(path),hwaccel=HWAccel('cuda',allow_software_fallback=False)) as container:
         if not container.streams.video:
             raise ValueError(f'В клипе нет видеодорожки: {Path(path).name}')
         stream = container.streams.video[0]
@@ -32,9 +35,10 @@ def _clip_frames(path, fps, target_size):
                 while output_index / fps < timestamp - 1e-9:
                     yield previous
                     output_index += 1
-            previous = frame.to_image().convert('RGB')
+            previous = gpu_video_image(frame).convert('RGB')
             if previous.size != target_size:
-                previous = previous.resize(target_size, Image.Resampling.BICUBIC)
+                from .gpu_pixels import CudaImage
+                previous = CudaImage(previous).resize(target_size)
             previous_time = timestamp
             duration = float(frame.duration * frame.time_base) if frame.duration else 1 / rate
         if previous is None:
@@ -66,14 +70,14 @@ def assemble_storyboard_video(clip_paths, output_path, fps=24, target_size=(1280
     written = 0
     try:
         with av.open(str(temporary), mode='w', format='mp4', options={'movflags': '+faststart'}) as container:
-            stream = container.add_stream('libx264', rate=fps)
+            stream = container.add_stream('h264_nvenc', rate=fps)
             stream.width, stream.height = target_size
             stream.pix_fmt = 'yuv420p'
-            stream.options = {'crf': '20', 'preset': 'veryfast'}
+            stream.options = {'preset':'p4','cq':'20','rc':'vbr'}
 
             def write(image):
                 nonlocal written
-                frame = av.VideoFrame.from_image(image)
+                frame = gpu_video_frame(image)
                 frame.pts = written
                 frame.time_base = Fraction(1, fps)
                 written += 1
@@ -92,7 +96,7 @@ def assemble_storyboard_video(clip_paths, output_path, fps=24, target_size=(1280
                     overlap = len(head)
                     while len(tail) > overlap:
                         write(tail.popleft())
-                    tail = deque(Image.blend(image, head[i], (i + 1) / (overlap + 1))
+                    tail = deque(gpu_blend(image, head[i], (i + 1) / (overlap + 1))
                                  for i, image in enumerate(tail))
                 for image in frames:
                     tail.append(image)

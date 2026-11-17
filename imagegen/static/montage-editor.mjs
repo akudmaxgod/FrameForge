@@ -1,11 +1,12 @@
+import {buildScienceMovie} from './science-build.mjs';
 import {foregroundPairDialog} from './montage-foreground.mjs';
 import {overlayFootage,segmentDuration,setClipSpeed} from './montage-layers.mjs';
 import {normalize} from './montage-timeline.mjs';
 import {MontagePlayer} from './montage-player.mjs';
-import {MontageLanes,timelineExtent,timelineTime} from './montage-lanes.mjs';
-import {mountVoiceFit} from './montage-fit-controls.mjs';
+import {MontageLanes,timelineExtent,timelineTime} from './montage-lanes.mjs?v=20261110_v8';
+import {mountVoiceFit} from './montage-fit-controls.mjs?v=gpu-20261112';
 import {mountMediaLibraryButton} from './media-library-panel.mjs';
-import {mountMaterialSearchButton} from './material-search.mjs';
+import {mountMaterialSearchButton} from './material-search.mjs?v=pixabay-scenario-20261116';
 const sessions=new Map();
 const loadingSessions=new Map();
 const copy=x=>structuredClone(x),key=id=>'frameforge-edit:'+id;
@@ -39,13 +40,14 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   let s=sessions.get(id);
   if(!s){
     if(!loadingSessions.has(id))loadingSessions.set(id,(async()=>{
-      const result=await api(`/projects/${id}/edit`);const state={id,api,doc:result.document,revision:result.revision,sources:result.sources,lastExport:result.last_export_id,history:[],future:[],version:0,dirty:false,error:'',conflict:false};
+      const result=await api(`/projects/${id}/edit`);const state={id,api,doc:result.document,revision:result.revision,sources:result.sources,lastExport:result.last_export_id,effectsSupported:result.visual_effects_supported,history:[],future:[],version:0,dirty:false,error:'',conflict:false};
       try{const draft=JSON.parse(localStorage.getItem(key(id)));if(draft){state.doc=draft.document;state.dirty=true;state.conflict=draft.revision!==state.revision;state.error=state.conflict?'Серверная версия изменилась. Локальный черновик сохранён. Перечитайте монтаж.':'';}}catch{}
       sessions.set(id,state);return state;
     })());
     try{s=await loadingSessions.get(id);}finally{loadingSessions.delete(id);}
   }else if(!s.dirty&&!s.promise){
     const result=await api(`/projects/${id}/edit`);
+    s.effectsSupported=result.visual_effects_supported;
     if(!s.dirty&&!s.promise&&result.revision>s.revision){
       s.doc=result.document;s.revision=result.revision;s.sources=result.sources;s.lastExport=result.last_export_id;
       s.history=[];s.future=[];
@@ -57,6 +59,8 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   const heading=node('h2','Монтаж');root.append(heading,toolbar);
   const disclosure=(title,content,cls='')=>{const d=node('details',undefined,'montage-disclosure '+cls);d.append(node('summary',title),content);return d;};
   const more=node('div',undefined,'montage-more-actions'),morePanel=disclosure('Ещё',more,'montage-more');
+  let scienceBuildBusy=false,scienceBuildStop=false,scienceBuildStage='';
+  const scienceBuildKey=key(id)+':science-build';
   let selected=null,selectedKind='video',selectedLayer='footage',page=0,disposed=false,job,timer,lanes;
   const stage=node('div',undefined,'montage-stage'),top=node('div',undefined,'montage-top'),inspector=node('aside',undefined,'montage-inspector'),preview=node('div');
   const controls=node('div',undefined,'montage-toolbar'),clock=node('span','0.00 с'),seek=node('input');seek.type='range';seek.min=0;seek.step=1;seek.setAttribute('aria-label','Время монтажа');
@@ -182,13 +186,28 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   const editorBody=node('div',undefined,'montage-editor-body'),library=node('aside',undefined,'montage-library'),libraryTabs=node('div',undefined,'montage-library-tabs');
   library.setAttribute('aria-label','Материалы проекта');libraryTabs.setAttribute('role','tablist');libraryTabs.setAttribute('aria-label','Инструменты монтажа');
   const transitionPane=node('div',undefined,'montage-transition-pane');
+  const effectsPane=node('div',undefined,'montage-transition-pane');
+  effectsPane.append(node('h3','Визуальные эффекты'),node('p','Применяются ко всему ролику. 0% выключает эффект.'));
+  const effectControls={};
+  for(const [key,name] of [['old_film','Старая плёнка'],['light_leaks','Блики и засветки']]){
+    const label=node('label'),value=node('span'),slider=node('input');
+    slider.type='range';slider.min='0';slider.max='100';slider.step='1';
+    slider.setAttribute('aria-label',name);
+    slider.oninput=()=>{value.textContent=`${name} · ${slider.value}%`;};
+    slider.onchange=()=>edit(doc=>{(doc.visual_effects??={})[key]=Number(slider.value);});
+    label.append(value,slider);effectsPane.append(label);
+    effectControls[key]={slider,update:slider.oninput};
+  }
   const panels={media:sceneList,audio:audioPanel,transitions:transitionPane,fit:fitHost},tabButtons={};
+  if(s.effectsSupported)panels.effects=effectsPane;
   const activateLibrary=name=>{for(const [key,panel] of Object.entries(panels)){panel.hidden=key!==name;tabButtons[key].setAttribute('aria-selected',String(key===name));}};
-  for(const [name,label] of [['media','Медиа'],['audio','Звук'],['transitions','Переходы'],['fit','Подгонка']]){
+  for(const [name,label] of [['media','Медиа'],['audio','Звук'],['transitions','Переходы'],['fit','Подгонка'],['effects','Эффекты']]){
+   if(!panels[name])continue;
    const tab=button(label,()=>activateLibrary(name));tab.setAttribute('role','tab');tab.id='montage-tab-'+name;tab.setAttribute('aria-controls','montage-panel-'+name);tabButtons[name]=tab;libraryTabs.append(tab);
    const panel=panels[name];panel.id='montage-panel-'+name;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',tab.id);if(panel.tagName==='DETAILS')panel.open=true;
   }
-  library.append(libraryTabs,sceneList,audioPanel,transitionPane,fitHost);activateLibrary('media');
+  if(s.effectsSupported)libraryTabs.classList.add('with-effects');
+  library.append(libraryTabs,...Object.values(panels));activateLibrary('media');
   inspectorPanel.open=true;inspectorPanel.setAttribute('aria-label','Свойства выбранного клипа');
   const resizerLeft=node('div',undefined,'montage-resizer montage-resizer-left');
   resizerLeft.setAttribute('role','separator');resizerLeft.setAttribute('aria-label','Изменить ширину левой панели');resizerLeft.title='Потяните для изменения ширины (двойной клик — сброс)';
@@ -235,6 +254,8 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   };
   bindResizer(resizerLeft,'left');bindResizer(resizerRight,'right');
   const exportPanel=disclosure('Экспорт',exports,'montage-export-menu');toolbar.append(exportPanel);
+  const fullMovieButton=project.visual_format==='science_atlas'?button('Собрать весь ролик',buildFullScienceVideo):null;
+  if(fullMovieButton){fullMovieButton.dataset.testid='science-build-full';toolbar.append(fullMovieButton);}
   const fit=mountVoiceFit(fitHost,{id,api,importedPrompts:Boolean(project.analysis_metadata?.prompt_import),flush:()=>flush(s),getState:()=>s,pause:()=>player.pause(),notice,accept:result=>{
    s.history.push(copy(s.doc));s.future=[];s.doc=result.document;s.revision=result.revision;s.sources=result.sources;s.version++;s.dirty=false;s.error='';s.conflict=false;localStorage.removeItem(key(id));render();showJob();
   }});
@@ -277,6 +298,27 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
       }
       c[name]=value;if(['trim_in_ms','trim_out_ms','hold_last_ms'].includes(name)){c.manual_timing=true;c.timing_locked=true;}
     });
+    if(c.science_atlas&&(c.science_atlas.illustrations||[]).length===1){
+      const atlas=c.science_atlas;
+      const prepareAtlas=async patch=>{
+        const version=s.version,next=await api(`/projects/${id}/science-atlas/preview`,{plan:{...atlas,...patch,presentation_locked:true}});
+        if(version!==s.version){notice('Клип изменён во время подготовки. Повторите выбор.',true);return;}
+        edit(()=>{c.science_atlas=next;});
+      };
+      const mode=node('select');mode.setAttribute('aria-label','Раскрытие научпоп-кадра');
+      for(const [value,label] of [['','Прежняя постановка'],['slide_explain','Раскрытие со смещением'],['staged_explain','Пояснения без смещения'],['focus_explain','Спокойный крупный план'],['detail_explain','Общий вид и деталь'],['single_subject','Один рисунок · по смыслу сцены']]){const o=node('option',label);o.value=value;mode.append(o);}mode.value=atlas.frame_density==='single_subject'?'single_subject':['slide_explain','staged_explain','focus_explain','detail_explain'].includes(atlas.presentation_motion)?atlas.presentation_motion:'';
+      const solo=node('label','Почему сцене нужен один рисунок'),reason=node('textarea');reason.rows=3;reason.setAttribute('aria-label','Обоснование одиночного рисунка');reason.value=atlas.single_subject_reason||'';solo.append(reason);solo.hidden=mode.value!=='single_subject';
+      reason.onchange=()=>prepareAtlas({presentation_motion:'none',frame_density:'single_subject',single_subject_reason:reason.value}).catch(e=>notice(e.message,true));
+      mode.onchange=()=>{solo.hidden=mode.value!=='single_subject';if(mode.value==='single_subject'){reason.focus();return;}prepareAtlas({presentation_motion:mode.value,frame_density:mode.value?'filled':'legacy'}).catch(e=>notice(e.message,true));};inspector.append(node('label','Раскрытие научпоп-кадра'),mode,solo);
+      if(['slide_explain','staged_explain','focus_explain','detail_explain'].includes(atlas.presentation_motion)){
+        const direction=node('select');direction.setAttribute('aria-label','Направление иллюстрации');for(const [value,label] of [['left','Иллюстрация слева · пояснения справа'],['right','Иллюстрация справа · пояснения слева']]){const o=node('option',label);o.value=value;direction.append(o);}direction.value=atlas.slide_direction||'left';direction.onchange=()=>prepareAtlas({slide_direction:direction.value}).catch(e=>notice(e.message,true));inspector.append(direction);
+      }
+      {
+        const notes=node('textarea');notes.setAttribute('aria-label','Короткие пояснения');notes.rows=5;notes.value=(atlas.explanatory_labels||atlas.labels||[]).join('\n');
+        notes.onchange=()=>{const values=notes.value.split('\n').map(x=>x.trim()).filter(Boolean);if(values.length>4||values.some(x=>x.length>110||x.split(/\s+/).length>8)){notice('До четырёх пояснений, каждое — до 8 слов и 110 знаков.',true);return;}prepareAtlas({explanatory_labels:values}).catch(e=>notice(e.message,true));};
+        inspector.append(node('label','Пояснения · одно на строку'),notes,node('p','Пишите названия частей, величины и причинные связи по исходному материалу. Схема берётся из проверенного плана.','muted'));
+      }
+    }
     field(advanced,'Сохранить выбор исходного кадра при подборе',base.media_replacement_locked,v=>edit(()=>base.media_replacement_locked=v),{type:'checkbox'});
     field(advanced,'Сохранить ручные границы при подгонке',c.timing_locked||c.manual_timing,v=>edit(()=>{c.timing_locked=v;c.manual_timing=v;c.allow_voice_retime=!v;}),{type:'checkbox'});
     if(c.media_type==='image'){
@@ -363,6 +405,9 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
     }
   }
   function render(){
+    for(const [key,{slider,update}] of Object.entries(effectControls)){
+      slider.value=String(s.doc.visual_effects?.[key]??0);update();
+    }
     if(disposed)return;
     const timeline=normalize(s.doc);player.setDocument(s.doc);seek.max=timelineExtent(s.doc);
     saveStatus();renderInspector(timeline);renderAudio();lanes.selection={kind:selectedKind==='video'&&selectedLayer==='footage'&&s.doc.clips.find(c=>c.edit_clip_id===selected)?.footage_overlay?'overlay':selectedKind,id:selectedKind==='video'?selected:selectedKind};lanes.render();strip.replaceChildren();pagination.replaceChildren();
@@ -390,6 +435,11 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   }
   function showJob(){
     exports.replaceChildren(node('h3','Экспорт'));
+    if(fullMovieButton){fullMovieButton.disabled=scienceBuildBusy||['queued','running'].includes(job?.status);fullMovieButton.textContent=scienceBuildBusy?'Собираю весь ролик…':'Собрать весь ролик';}
+    if(project.visual_format==='science_atlas'){
+      const full=button(scienceBuildBusy?'Собираю весь ролик…':'Собрать весь ролик',buildFullScienceVideo);full.dataset.testid='science-build-full-menu';full.disabled=scienceBuildBusy||['queued','running'].includes(job?.status);exports.append(full,node('p','Сцены → подгонка по словам озвучки → итоговый MP4 на видеокарте.'));
+      if(scienceBuildBusy)exports.append(node('p',scienceBuildStage),button('Остановить сборку',()=>{scienceBuildStop=true;}));
+    }
     const quality=node('label','Качество '),select=node('select');
     for(const [height,title] of [[1080,'Full HD · 1920 × 1080'],[720,'HD · 1280 × 720']]){const option=node('option',title);option.value=String(height);option.selected=height===(s.doc.export_settings?.height||1080);select.append(option);}
     select.onchange=()=>{edit(doc=>doc.export_settings={width:Number(select.value)===1080?1920:1280,height:Number(select.value),fps:24});showJob();};quality.append(select);exports.append(quality);
@@ -397,9 +447,22 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
     if(s.doc.voice_fit?.cues?.length)exports.append(button('Скачать субтитры (.srt)',async()=>{await flush(s);const result=await api(`/projects/${id}/edit/subtitles`);const url=URL.createObjectURL(new Blob([result.srt],{type:'text/plain;charset=utf-8'}));const a=node('a');a.href=url;a.download='frameforge.srt';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}));
     if(!job)return;
     if(['queued','running'].includes(job.status)){const progress=node('progress');progress.max=100;progress.value=job.progress;exports.append(node('p',`${job.stage} · ${Math.round(job.progress)}%`),progress);}
-    if(job.error)exports.append(node('p',job.error,'montage-warning'));
+    if(job.error){exports.append(node('p',job.error,'montage-warning'));localStorage.removeItem(scienceBuildKey);}
     if(job.url){const link=node('a',job.edit_revision===s.revision?'Скачать готовое видео':'Скачать предыдущий экспорт');link.href=job.url;link.download='frameforge.mp4';exports.append(link);}
     if(['queued','running'].includes(job.status))exports.append(button('Отменить экспорт',async()=>{job=await api(`/projects/${id}/edit/exports/${job.id}/cancel`,{});showJob();}));
+  }
+  async function buildFullScienceVideo(){
+    if(project.visual_format!=='science_atlas'||scienceBuildBusy||['queued','running'].includes(job?.status))return;
+    scienceBuildBusy=true;scienceBuildStop=false;exportPanel.open=true;player.pause();showJob();
+    try{
+      let checkpoint={};try{checkpoint=JSON.parse(localStorage.getItem(scienceBuildKey))||{};}catch{}
+      job=await buildScienceMovie({id,api,getState:()=>s,flush:()=>flush(s),synchronize:()=>sync(false),checkpoint,
+        cancelled:()=>scienceBuildStop||disposed,
+        saveCheckpoint:value=>{if(value)localStorage.setItem(scienceBuildKey,JSON.stringify(value));else localStorage.removeItem(scienceBuildKey);},
+        progress:value=>{scienceBuildStage=value;showJob();},accept:result=>{s.history.push(copy(s.doc));s.future=[];s.doc=result.document;s.revision=result.revision;s.sources=result.sources;s.version++;s.dirty=false;s.error='';s.conflict=false;localStorage.removeItem(key(id));render();}});
+      s.lastExport=job.id;localStorage.setItem(key(id)+':job',job.id);showJob();poll();
+    }catch(error){notice(error.message,true);audioPanel.open=!(s.doc.audio_tracks||[]).some(a=>a.role==='voice'&&a.enabled!==false);throw error;}
+    finally{scienceBuildBusy=false;scienceBuildStage='';showJob();}
   }
   async function poll(){clearTimeout(timer);if(disposed||!job)return;try{const announce=job.announce,previous=job.status;job=await api(`/projects/${id}/edit/exports/${job.id}`);if(disposed)return;showJob();if(job.status==='completed'&&(announce||['queued','running'].includes(previous)))notice(`Видео готово · ${job.width} × ${job.height}. Можно скачать MP4.`);if(['queued','running'].includes(job.status))timer=setTimeout(poll,1000);}catch(e){notice(e.message,true);}}
   const keyboard=e=>{
@@ -420,6 +483,6 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
   render();showJob();if(s.dirty&&!s.conflict)s.timer=setTimeout(()=>flush(s).catch(e=>notice(e.message,true)),650);
   const last=s.lastExport||localStorage.getItem(key(id)+':job');if(last){job={id:last};poll();}
   let updating=false;
-  return {projectId:id,async prepareMaintenance(){player.pause();await flush(s);},async updateProject(next){if(updating||disposed)return;updating=true;project=next;sceneMap.clear();for(const scene of next.scenes)sceneMap.set(scene.id,scene);try{const result=await api(`/projects/${id}/edit`);if(!disposed){s.sources=result.sources;if(!s.dirty&&!s.promise&&!player.playing&&result.revision!==s.revision){s.history=[...s.history,copy(s.doc)].slice(-60);s.doc=result.document;s.revision=result.revision;s.future=[];render();showJob();}else renderInspector(normalize(s.doc));if(result.last_export_id&&result.last_export_id!==s.lastExport&&!['queued','running'].includes(job?.status)){s.lastExport=result.last_export_id;job={id:s.lastExport,announce:true};poll();}}}catch{}finally{updating=false;}},dispose(){disposed=true;document.removeEventListener('keydown',keyboard);fit.dispose();if(s.notify===saveStatus)s.notify=null;clearTimeout(timer);lanes.dispose();player.dispose();window.removeEventListener('beforeunload',unload);if(s.dirty)flush(s).catch(()=>{});}};
+  return {projectId:id,buildFullScienceVideo,async prepareMaintenance(){player.pause();await flush(s);},async updateProject(next){if(updating||disposed)return;updating=true;project=next;sceneMap.clear();for(const scene of next.scenes)sceneMap.set(scene.id,scene);try{const result=await api(`/projects/${id}/edit`);if(!disposed){s.sources=result.sources;if(!s.dirty&&!s.promise&&!player.playing&&result.revision!==s.revision){s.history=[...s.history,copy(s.doc)].slice(-60);s.doc=result.document;s.revision=result.revision;s.future=[];render();showJob();}else renderInspector(normalize(s.doc));if(result.last_export_id&&result.last_export_id!==s.lastExport&&!['queued','running'].includes(job?.status)){s.lastExport=result.last_export_id;job={id:s.lastExport,announce:true};poll();}}}catch{}finally{updating=false;}},dispose(){disposed=true;document.removeEventListener('keydown',keyboard);fit.dispose();if(s.notify===saveStatus)s.notify=null;clearTimeout(timer);lanes.dispose();player.dispose();window.removeEventListener('beforeunload',unload);if(s.dirty)flush(s).catch(()=>{});}};
 }
 

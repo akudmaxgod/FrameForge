@@ -172,6 +172,8 @@ def scene_contract(project,scene,references,review_plan=None,catalog_context=Non
         'conflicts':list(dict.fromkeys(conflicts)),'status':'needs_resolution' if conflicts else 'bound',
         'precedence':['exact_source_and_explicit_editorial_decision','agreed_scene_contract','style_and_composition'],
         'free_design':['lighting','framing','minor decoration','background headcount unless source-critical']}
+    if (data.get('storyboard_frame') or {}).get('reported_content'):
+        result['reported_content'] = True
     return {**result,'hash':fingerprint(result)}
 
 
@@ -199,7 +201,14 @@ def render_contract(contract):
     quote=source.get('quote','')
     result['source_evidence']={'start':source.get('start'),'end':source.get('end'),
                               'quote_sha256':fingerprint(quote),'full_quote_retained':True}
-    if isinstance(quote,str) and len(quote)<=1600:
+    from .entity_identity import reported_content, visual_reporting_action
+    contains_report = contract.get('reported_content') or bool(reported_content(quote or ''))
+    if contains_report:
+        for field in ('action', 'direction'):
+            if isinstance(result.get(field), str):
+                result[field] = visual_reporting_action(result[field])
+        result['reported_event_direction'] = 'Keep reported events offscreen. Show the people exchanging or reacting to the information.'
+    if isinstance(quote,str) and len(quote)<=1600 and not contains_report:
         result['source_evidence']['quote']=quote
     else:
         result['source_evidence']['quote_in_prompt']=False

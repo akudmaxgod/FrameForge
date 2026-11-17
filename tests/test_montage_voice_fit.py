@@ -50,6 +50,16 @@ class CalculationTests(unittest.TestCase):
         for c in snap['document']['clips']:c.update(media_type='image',source_video_asset_id=None,source_image_asset_id='image',source_duration_ms=86400000,trim_out_ms=5000)
         result=propose(snap,a);self.assertTrue(result['can_apply']);self.assertEqual([c['trim_out_ms'] for c in result['document']['clips']],[1700,1500,1300])
 
+    def test_retime_preserves_entire_selected_video_segment_in_both_directions(self):
+        snap,a=pure_fixture()
+        for c in snap['document']['clips']:c.update(source_duration_ms=6000,trim_in_ms=500,trim_out_ms=5500)
+        result=propose(snap,a,policy='retime');self.assertTrue(result['can_apply'],result['conflicts'])
+        self.assertEqual(result['timeline']['duration_ms'],4500)
+        for c in result['document']['clips']:
+            self.assertEqual(c['trim_in_ms'],500);self.assertEqual(c['trim_out_ms'],5500);self.assertEqual(c['hold_last_ms'],0)
+        snap,a=pure_fixture();result=propose(snap,a,policy='retime');self.assertTrue(result['can_apply'])
+        self.assertLess(result['document']['clips'][0]['playback_rate'],1)
+
     def test_transition_does_not_shift_following_phrases(self):
         snap,a=pure_fixture();snap['document']['transitions']=[{'left':'0','right':'1','kind':'dissolve','duration_ms':500},{'left':'1','right':'2','kind':'black','duration_ms':300}]
         result=propose(snap,a);timeline=result['timeline'];self.assertTrue(result['can_apply'])

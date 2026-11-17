@@ -6,13 +6,13 @@ const seconds=ms=>(ms/1000).toFixed(2)+' с';
 export function mountVoiceFit(host,{id,api,flush,getState,accept,pause,notice,importedPrompts=false}){
  const panel=node('section');panel.className='montage-fit-preview';panel.hidden=true;host.append(panel);
  let job=null,timer,disposed=false,previewPlayer,semanticReview;
- const quick=button('Подогнать под озвучку',async()=>{quick.disabled=true;try{await flush();pause();job=await api(`/projects/${id}/edit/voice-fit`,{expected_revision:getState().revision,timing_mode:'auto'});localStorage.setItem(key(id),job.id);await poll();}finally{quick.disabled=false;}});
+ const quick=button('По словам озвучки',async()=>{quick.disabled=true;try{await flush();pause();job=await api(`/projects/${id}/edit/voice-fit`,{expected_revision:getState().revision,timing_mode:'phrases',short_video_policy:'hold'});localStorage.setItem(key(id),job.id);await poll();}finally{quick.disabled=false;}});
  function button(label,action){const b=node('button',label);b.type='button';b.onclick=()=>Promise.resolve().then(action).catch(e=>notice(e.message,true));return b;}
  const select=node('select');select.setAttribute('aria-label','Если видео короче фразы');
  const mode=node('select');mode.setAttribute('aria-label','Способ подгонки к озвучке');
- for(const [value,label] of [['condense','Сократить видеоряд под озвучку'],['semantic','По смыслу · готовые промпты и речь'],['duration_freeze','По длительности · со стоп-кадрами'],['phrases','По фразам · нужны цитаты сценария']]){const o=node('option',label);o.value=value;mode.append(o);}mode.value=importedPrompts?'semantic':'phrases';
- mode.onchange=()=>{select.hidden=mode.value!=='phrases';start.textContent=mode.value==='condense'?'Предложить сокращение':mode.value==='semantic'?'Сопоставить сцены с озвучкой':mode.value==='duration_freeze'?'Подогнать со стоп-кадрами':'Подогнать монтаж под фразы';};
- for(const [value,label] of [['hold','Удерживать последний кадр'],['speed','Снизить скорость до 0.8×'],['error','Показать конфликт']]){const o=node('option',label);o.value=value;select.append(o);}
+ for(const [value,label] of [['phrases','По словам озвучки · точные цитаты'],['auto','Быстро · распределить длительности'],['condense','Сократить видеоряд под озвучку'],['semantic','По смыслу · готовые промпты и речь'],['duration_freeze','По длительности · со стоп-кадрами']]){const o=node('option',label);o.value=value;mode.append(o);}mode.value=importedPrompts?'semantic':'phrases';
+ mode.onchange=()=>{select.hidden=!['phrases','words'].includes(mode.value);start.textContent=mode.value==='phrases'?'Рассчитать по словам озвучки':mode.value==='auto'?'Распределить длительности':mode.value==='condense'?'Предложить сокращение':mode.value==='semantic'?'Сопоставить сцены с озвучкой':mode.value==='duration_freeze'?'Подогнать со стоп-кадрами':'Подогнать монтаж под фразы';};
+ for(const [value,label] of [['retime','Весь фрагмент · изменить скорость'],['hold','Удерживать последний кадр'],['speed','Снизить скорость до 0.8×'],['error','Показать конфликт']]){const o=node('option',label);o.value=value;select.append(o);}
  const start=button('Подогнать монтаж под озвучку',async()=>{
   await flush();pause();const state=getState();
   job=await api(`/projects/${id}/edit/voice-fit`,{expected_revision:state.revision,short_video_policy:select.value,timing_mode:mode.value});
@@ -27,7 +27,7 @@ export function mountVoiceFit(host,{id,api,flush,getState,accept,pause,notice,im
   const semantic=condense||job.timing_mode==='semantic'||job.proposal?.method==='semantic';
   panel.append(node('h3',condense?'Сокращение видеоряда под озвучку':semantic?'Смысловая привязка готовых сцен':byDuration?'Подгонка стоп-кадрами под длину озвучки':'Подгонка под фразы озвучки'),node('p',job.stage));
   if(job.error)panel.append(node('p',job.error));
-  if(['queued','recognizing'].includes(job.status)){panel.append(node('p',`${job.progress||0}% · Расчёт выполняется на этом ПК.`),button('Отменить расчёт',async()=>{job=await api(`/projects/${id}/edit/voice-fit/${job.id}/cancel`,{});render();}));return;}
+  if(['queued','recognizing'].includes(job.status)){panel.append(node('p',`${job.progress||0}% · ${job.compute_device==='cuda'?'Режим видеокарты CUDA · локально':'Расчёт выполняется локально'}.`),button('Отменить расчёт',async()=>{job=await api(`/projects/${id}/edit/voice-fit/${job.id}/cancel`,{});render();}));return;}
   const proposal=job.proposal;
   if(!proposal)return;
   if(job.status==='applied'){
@@ -61,7 +61,8 @@ export function mountVoiceFit(host,{id,api,flush,getState,accept,pause,notice,im
   const table=node('table'),head=node('tr');for(const label of [byDuration?'Клип':'Фраза','Сейчас','После подгонки','Стоп-кадр'])head.append(node('th',label));table.append(head);
   for(const c of proposal.changes){const row=node('tr');row.append(node('td',c.label||c.quote),node('td',`${seconds(c.old_start_ms)} — ${seconds(c.old_end_ms)}`),node('td',`${seconds(c.new_start_ms)} — ${seconds(c.new_end_ms)}`),node('td',seconds(c.hold_last_ms||0)));table.append(row);}panel.append(table);
   }
-  panel.append(node('p','Предпросмотр не меняет сохранённый монтаж. Речь воспроизводится в исходной скорости.'));
+  panel.append(node('p','Предпросмотр не меняет сохранённый монтаж и задания анимации. Речь воспроизводится в исходной скорости.'));
+  if(['words','phrases'].includes(job.timing_mode))panel.append(node('p','Границы кадров рассчитаны по таймкодам слов связанных цитат. Пропущенные распознаванием слова автоматически размещаются между опорными словами. Оценённые границы отмечаются в отчёте.'));
   if(proposal.can_apply){
    const stage=node('div');stage.className='montage-stage';const clock=node('p','0.00 с'),seek=node('input');seek.type='range';seek.min=0;seek.step=1;seek.max=proposal.timeline.duration_ms;seek.setAttribute('aria-label','Предпросмотр подгонки');
    previewPlayer=new MontagePlayer(stage,(time)=>{clock.textContent=seconds(time);seek.value=time;},e=>notice(e.message,true));previewPlayer.setDocument(proposal.document);

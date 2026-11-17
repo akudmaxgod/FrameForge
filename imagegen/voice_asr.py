@@ -85,12 +85,14 @@ def splice_repair(asr, new, report, a, b):
 
 
 def recognize(audio_path, model_path, output, progress, story_path):
+    from .gpu_runtime import prepare_dlls
+    prepare_dlls()
     from faster_whisper import WhisperModel, BatchedInferencePipeline
     from faster_whisper.audio import decode_audio
     story = story_path.read_text(encoding='utf-8')
     audio = decode_audio(str(audio_path), sampling_rate=16000)
     duration = len(audio) / 16000
-    model = WhisperModel(str(model_path), device='cpu', compute_type='int8',
+    model = WhisperModel(str(model_path), device='cuda', compute_type='int8_float16',
                          cpu_threads=4, num_workers=1, local_files_only=True)
     pipe = BatchedInferencePipeline(model=model)
     sections = output.parent / (output.stem + '-sections')
@@ -143,6 +145,8 @@ def recognize(audio_path, model_path, output, progress, story_path):
     asr['repair_story_sha256'] = hashlib.sha256(story.encode()).hexdigest()
     asr['repair_intervals_checked'] = len(intervals)
     asr['repair_diagnostics'] = diagnostics
+    asr['compute_device']='cuda'
+    asr['compute_type']='int8_float16'
     write(output, asr)
     write(progress, {'processed_seconds': duration, 'total_seconds': duration, 'complete': True})
 

@@ -34,8 +34,8 @@ def marker_contract(people=True):
 
 
 GRITTY_PREFIX = "Gritty Graphic Novel"
-GRITTY_INK_STYLE = 'Gritty Graphic Novel: detailed 2D ink illustration, clean variable-weight dark contours, fine facial and architectural lines, hatching for fur/chainmail/stone; muted ochre, brown, olive, slate and dusty blue with sparse deep red. Flat local colors with subtle smooth volume gradients, soft form shadows and hard cast shadows; restrained matte highlights, paper grain, atmospheric depth.'
-GRITTY_FLOW_STYLE = GRITTY_INK_STYLE + ' Realistic 1:6-1:7 adult proportions, distinct expressive faces, natural hands and fabric drapery; preserve required age/body differences. Keep each named hero recognizable from their established screen identity or supplied reference, including individual facial structure, hairline, age and scars. Depict only story-required cast, action and setting. No photography, 3D, painterly brushwork, cel shading, glossy highlights, captions or speech balloons.'
+GRITTY_INK_STYLE = 'Gritty Graphic Novel: visibly hand-drawn 2D ink illustration across the entire image, including faces and background; clearly visible ink contours and matte flat color shapes, clean variable-weight dark contours, fine facial and architectural lines, hatching for fur/chainmail/stone; muted ochre, brown, olive, slate and dusty blue with sparse deep red. Flat local colors with subtle smooth volume gradients, soft form shadows and hard cast shadows; restrained matte highlights, paper grain, atmospheric depth.'
+GRITTY_FLOW_STYLE = GRITTY_INK_STYLE + ' Realistic 1:6-1:7 adult proportions, distinct expressive faces, natural hands and fabric drapery; preserve required age/body differences. Keep each named hero recognizable from their established screen identity or supplied reference, including individual facial structure, hairline, age and scars. Depict only story-required cast, action and setting. No photography, photographic skin, live-action film still, 3D, painterly brushwork, cel shading, glossy highlights, captions or speech balloons.'
 
 def is_gritty_style(style):
     return str(style or "").strip().casefold().startswith(GRITTY_PREFIX.casefold())

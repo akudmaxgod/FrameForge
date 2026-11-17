@@ -1,6 +1,6 @@
 import {createStyleSelectorCard, openStyleGallery} from './style-gallery.mjs?v=20261031_v1';
 import {STYLE_PRESETS, MODES, titleFromStory, clampSceneCount, presetForStyle, MAX_SCENES, SECONDS_PER_FRAME, recommendedSceneCount, storyboardTiming, countStoryWords, readingDurationSeconds} from './ui-config.mjs?v=marker_20261031';
-import {mountMontage} from './montage-editor.mjs';
+import {mountMontage} from './montage-editor.mjs?v=pixabay-scenario-20261116';
 import {smartMotion} from './smart-motion.mjs';
 import {beginAnimationRun,animationRunProgress} from './animation-completion.mjs';
 import {pendingCloudAnimation,animationLaunchPlan} from './animation-launch.mjs';
@@ -13,7 +13,14 @@ import {openPromptImport,editImportedPrompt,formatImportTime} from './prompt-imp
 import {makeProjectActivation} from './project-selection.mjs';
 import {openProjectManager} from './project-manager.mjs';
 const activateProject=makeProjectActivation(api);
-let montageView=null,montageProjectId=null,montageRenderId=0;
+let montageView=null,montageProjectId=null,montageRenderId=0,montageReady=null;
+let fullScienceStarting=false;
+async function buildFullScienceFromStudio(){
+ if(fullScienceStarting)return;const pid=current;fullScienceStarting=true;
+ try{if(view!=='export'||montageView?.projectId!==pid){view='export';render();await montageReady;}
+ if(current!==pid||!montageView)return;await montageView.buildFullScienceVideo();
+ }catch(error){showNotice(error.message,true);}finally{fullScienceStarting=false;}
+}
 
 const main=document.querySelector('#main'), controls=document.querySelector('#controls');
 const notice=document.querySelector('#notice'), dialog=document.querySelector('#editor');
@@ -196,7 +203,7 @@ function storeOmniSelection(){try{localStorage.setItem('frameforge-omni-selectio
 function updateAnimationSelectionSummary(){
   const scenes=project.scenes.filter(s=>!animationLocked(s)),selected=scenes.filter(s=>omniSelection().has(s.id)).length;
   const queued=project.scenes.filter(s=>pendingCloudAnimation(s)&&omniSelection().has(s.id)).length;
-  const label=document.querySelector('[data-testid=animation-selection-summary]');if(label)label.textContent=`${animationModelName(selectedAnimationEngine())}: ${selected+queued} · 2.5D: ${scenes.length-selected} · готовые / запущенные: ${project.scenes.length-scenes.length}`+(queued?` · продолжить: ${queued}`:'');
+  const label=document.querySelector('[data-testid=animation-selection-summary]');if(label)label.textContent=`${animationModelName(selectedAnimationEngine())}: ${selected+queued}${project.visual_format==='science_atlas'?'':` · 2.5D: ${scenes.length-selected}`} · готовые / запущенные: ${project.scenes.length-scenes.length}`+(queued?` · продолжить: ${queued}`:'');
   renderAnimationBudget();
 }
 function renderAnimationBudget(){
@@ -231,7 +238,7 @@ async function saveAnimationSelection(){
   const latest=await api(`/projects/${pid}`);
   const result=await api(`/projects/${pid}/animation/selection`,{selected_scene_ids:selection.filter(id=>latest.scenes.some(s=>s.id===id)),animation_engine:engine,expected_revisions:Object.fromEntries(latest.scenes.map(s=>[s.id,s.current_revision]))});
   const updated=await api(`/projects/${pid}`);
-  if(current===pid){project=updated;render();showNotice(`Выбор сохранён: ${result.selected_cloud} ${animationModelName(engine)}, ${result.local_2_5d} кадров 2.5D. Генерация ещё не запущена.`);}
+  if(current===pid){project=updated;render();showNotice(`Выбор сохранён: ${result.selected_cloud} ${animationModelName(engine)}${project.visual_format==='science_atlas'?'':`, ${result.local_2_5d} кадров 2.5D`}. Генерация ещё не запущена.`);}
   return pid;
 }
 async function runSelectedAnimations(onlySceneId=null){
@@ -249,8 +256,10 @@ async function runSelectedAnimations(onlySceneId=null){
     const ready=plan.fresh;
     if(!ready.length&&!plan.resume.length)throw Error('Нет кадров для запуска: проверьте актуальность и утверждение изображений. Готовые видео повторно не запускаются.');
     // Persist only this launch's selected scenes; other frames and running jobs stay untouched.
+    let selectedCount=0;
     for(const scene of ready){
       if(current!==pid)return;
+      showNotice(`Подготовка ${model}: ${++selectedCount} из ${ready.length}…`);
       await api(`/scenes/${scene.id}/animation/select`,{engine});
     }
     if(current!==pid)return;
@@ -312,6 +321,16 @@ async function runSingleAnimation(sceneId,engine){
     if(current===pid){await refresh(true);showNotice(`Кадр ${scene.position}: ${name}${engine==='ken_burns'?' готово — смотрите видео на карточке.':' отправлен в Flow. Остальные кадры не запускались.'}`);}
   }catch(error){const scene=project?.scenes.find(s=>s.id===sceneId);if(scene)animationRunFailed(pid,scene,error.message);if(current===pid)await refresh(true);throw error;}
   finally{animationRunBusy=false;render();updateAnimationCompletion();}
+}
+async function rebuildScientificScene(sceneId){
+  if(animationRunBusy)return;
+  const pid=current;animationRunBusy=true;render();
+  try{
+    const result=await api(`/projects/${pid}/animation/regenerate-local`,{scene_ids:[sceneId]});
+    const status=result.scenes?.find(s=>s.scene_id===sceneId);
+    if(status?.status!=='completed')throw Error(status?.error||'Не удалось пересобрать научный кадр.');
+    if(current===pid){await refresh(true);showNotice('Видео со схемами пересобрано на видеокарте.');}
+  }finally{animationRunBusy=false;if(current===pid)render();}
 }
 async function resumeSceneAnimation(scene){
   const pid=current;
@@ -380,6 +399,7 @@ async function rebuildLocalAnimations(){
 }
 function renderAnimationSelectionBar(){
   const bar=el('section',undefined,'animation-selection-bar');
+  if(project.visual_format==='science_atlas')bar.append(el('p','Галочки выбирают кадры для анимации в Flow. «Собрать видео со схемами» создаёт ролик локально.','muted'));
   const model=animationModelName(selectedAnimationEngine());
   bar.append(el('strong','Выберите модель и отметьте кадры'),renderAnimationModelPicker('toolbar'),el('p',`Запускаются только отмеченные кадры — ${model} через Google Flow.`,'muted'));
   if(selectedAnimationEngine()==='veo_lite')bar.append(el('small','Veo использует кредиты Google Flow.','muted'));
@@ -388,14 +408,14 @@ function renderAnimationSelectionBar(){
   if(activeRun&&!activeRun.finished){const progress=animationRunProgress(activeRun,project.scenes),status=el('small',`Анимация: готово ${progress.completed.length} из ${progress.total}. По завершении появится уведомление «Анимации готовы».`,'animation-progress');status.dataset.testid='animation-progress';bar.append(status);}
   const selectable=project.scenes.filter(s=>!animationLocked(s)),count=selectable.filter(s=>omniSelection().has(s.id)).length;
   const queued=project.scenes.filter(s=>pendingCloudAnimation(s)&&omniSelection().has(s.id)).length;
-  summary.textContent=`${model}: ${count+queued} · 2.5D: ${selectable.length-count} · готовые / запущенные: ${project.scenes.length-selectable.length}`+(queued?` · продолжить: ${queued}`:'');
+  summary.textContent=`${model}: ${count+queued}${project.visual_format==='science_atlas'?'':` · 2.5D: ${selectable.length-count}`} · готовые / запущенные: ${project.scenes.length-selectable.length}`+(queued?` · продолжить: ${queued}`:'');
   const actions=el('div',undefined,'animation-selection-actions');
   actions.append(button('Снять все галочки',()=>{for(const s of selectable)omniSelection().delete(s.id);storeOmniSelection();render();},'secondary','animation-select-none'),button(`Все в ${model}`,()=>{for(const s of selectable)omniSelection().add(s.id);storeOmniSelection();render();},'secondary','animation-select-all'),button('Сохранить выбор',saveAnimationSelection,'secondary','btn-animation-plan'),button('Запустить выбранные',()=>runSelectedAnimations(),'primary','btn-animation-generate'));
   const localReady=unselectedLocalAnimationScenes(project.scenes,omniSelection());
   const localLaunch=button(`Запустить остальные в 2.5D (${localReady.length})`,runUnselectedLocalAnimations,'primary','animation-generate-unselected-local');
   localLaunch.disabled=!localReady.length;
   localLaunch.title='Создать 2.5D для неотмеченных кадров с готовыми изображениями. Готовые ролики и задачи Flow пропускаются.';
-  actions.append(localLaunch);
+  if(project.visual_format!=='science_atlas')actions.append(localLaunch);
   if(project.scenes.some(s=>s.data.animation?.selected_engine==='ken_burns'&&s.video_asset_id))actions.append(button('Обновить плавность 2.5D',rebuildLocalAnimations,'secondary','animation-rebuild-local'));
   if(animationRunBusy){for(const b of actions.children)b.disabled=true;actions.querySelector('[data-testid="btn-animation-generate"]').textContent='Создаю анимации…';}
   if(localAnimationBatchProject===current){
@@ -682,10 +702,7 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
       showNotice(attached?'Мост проверен и подключён к выбранному проекту ФФ.':'Flow не подтвердил команду проверки. Откройте FrameForge Bridge и дождитесь статуса «Инструмент подключён».',!attached);
     },'small-button','flow-bridge-check');
     const openFlowBtn=button('↗ Открыть FrameForge Bridge',()=>{
-      const configured=String(currentSettings?.flow_project_url||'').trim();
-      let url;try{url=new URL(configured);}catch{throw Error('Укажите ссылку на доступный вам FrameForge Bridge в настройках Google Flow.');}
-      if(url.protocol!=='https:'||url.hostname!=='flow.google.com')throw Error('Ссылка инструмента должна вести на https://flow.google.com.');
-      window.open(url.href,'_blank','noopener');
+      window.open('https://flow.google.com/project/d72dddb5-c45a-4375-8026-d3e5db47d807/tool/5f63be1c-9e20-4da7-958e-f68b20edc979','_blank','noopener');
     },'small-button','flow-bridge-open');
     const startFlowBtn=button('▶ Запустить генерацию в Flow',async()=>{
       if(!current)throw Error('Сначала откройте проект ФФ.');
@@ -770,12 +787,20 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
   const cameraTabs=el('div',undefined,'camera-tabs');cameraTabs.setAttribute('role','radiogroup');cameraTabs.setAttribute('aria-label','Камера');
   for(const item of CAMERA_MODES){const choice=button('',()=>{if(!locked){selectedCameraMode=item.id;saveItem(STORAGE_KEYS.cameraMode,selectedCameraMode);render();}},'camera-tab'+(cameraId===item.id?' selected':''),`camera-${item.id}`);choice.disabled=locked;choice.setAttribute('role','radio');choice.setAttribute('aria-checked',String(cameraId===item.id));choice.append(el('span',item.icon),el('small',item.name));cameraTabs.append(choice);}
   cameraBox.append(cameraTabs);if(cameraId==='custom'){const field=el('textarea');field.maxLength=1000;field.placeholder='Опишите планы и ракурсы камеры…';field.value=locked?(project.camera_custom||''):selectedCameraCustom;field.readOnly=locked;field.setAttribute('aria-label','Своя камера');field.addEventListener('input',()=>{selectedCameraCustom=field.value;if(!locked){saveItem(STORAGE_KEYS.cameraCustom,selectedCameraCustom);}});cameraBox.append(field);}controls.append(cameraBox);
+  const visualFormat=project?.visual_format||getSavedItem('frameforge-visual-format','standard');
+  if(visualFormat==='science_atlas'){styleBox.hidden=true;modeBox.hidden=true;cameraBox.hidden=true;}
+  const formatBox=el('section',undefined,'control-section');formatBox.append(sectionLabel('Визуальная подача'));
+  const formatChoice=selectOptions([['standard','История · обычная раскадровка'],['science_atlas','Научпоп · иллюстрации и схемы']],visualFormat,'visual-format','Визуальная подача');
+  formatChoice.disabled=Boolean(project);formatChoice.style.width='100%';formatChoice.onchange=()=>{saveItem('frameforge-visual-format',formatChoice.value);render();};
+  formatBox.append(formatChoice,el('p',visualFormat==='science_atlas'?'Flow создаёт библиотеку иллюстраций. FrameForge собирает подписи, сравнения и схемы. Раскрытия, крупные планы, детали и схемы автоматически чередуются по смыслу сцен.':'Выберите подачу до разбора сценария.','mode-description'));controls.append(formatBox);
+  if(project?.visual_format==='science_atlas')formatBox.append(button('Пересобрать готовые сцены',async()=>{const r=await api(`/projects/${project.id}/science-atlas/assemble`,{});await refresh(true);showNotice(`Собрано: ${r.assembled}; ждут иллюстраций: ${r.waiting}.`);},'secondary','science-assemble'));
   const composition=el('section',undefined,'control-section');
   composition.append(sectionLabel('Движение в сценах'));
   const compositionChoice=selectOptions([['standard','Обычные кадры'],['foreground','Живой передний план · 2 слоя']],
     flowComposition(project?.id),'flow-composition','Движение в сценах');
   compositionChoice.style.width='100%';
-  compositionChoice.disabled=Boolean(project?.flow_composition);
+  compositionChoice.disabled=Boolean(project?.flow_composition)||visualFormat==='science_atlas';
+  if(visualFormat==='science_atlas')compositionChoice.value='standard';
   const layerOptions=el('div',undefined,'mode-description');
   const layerChoice=selectOptions([['from_still','Разделять готовый кадр'],['direct','Генерировать сразу слоями']],
     project?.flow_layer_source||draftLayerSource(),'flow-layer-source','Как получить два слоя');
@@ -815,7 +840,7 @@ function renderControls(){controls.replaceChildren();const locked=Boolean(projec
 function imagePath(src,alt){const img=el('img');img.src=src;img.alt=alt;return img;}
 function analysisActive(){return project?.generations.some(g=>g.purpose==='analysis'&&isActiveGeneration(g));}
 async function handleGenerateClick(){await createAndAnalyse();}
-async function createAndAnalyse(){if(!draftStory.trim())throw Error('Добавьте текст сценария.');if(voiceDraft.file){const capability=await api('/voice/capability');if(!capability.ready)throw Error(capability.message);}const preset=STYLE_PRESETS.find(item=>item.id===selectedPreset);const composition=flowComposition(null);const created=await api('/projects',{title:titleFromStory(draftStory),idea:'',story:draftStory,style:preset.prompt,mode:selectedMode,camera_mode:selectedCameraMode,camera_pacing:selectedCameraPacing,camera_custom:selectedCameraCustom,aspect_ratio:selectedAspectRatio,flow_composition:composition,flow_layer_source:composition==='foreground'?draftLayerSource():'from_still',channel_profile_id:selectedChannelId||undefined});current=created.id;project=created;if(voiceDraft.file){showNotice('Загружаю озвучку…');await startVoiceProject(api,current);}else await api(`/projects/${current}/analyse`,{target:clampSceneCount(draftTarget)});await listProjects();await refresh(true);showNotice('Проект создан. Обработка выполняется в FrameForge.');}
+async function createAndAnalyse(){if(!draftStory.trim())throw Error('Добавьте текст сценария.');if(voiceDraft.file){const capability=await api('/voice/capability');if(!capability.ready)throw Error(capability.message);}const preset=STYLE_PRESETS.find(item=>item.id===selectedPreset);const composition=flowComposition(null);const created=await api('/projects',{title:titleFromStory(draftStory),idea:'',story:draftStory,visual_format:getSavedItem('frameforge-visual-format','standard'),style:preset.prompt,mode:selectedMode,camera_mode:selectedCameraMode,camera_pacing:selectedCameraPacing,camera_custom:selectedCameraCustom,aspect_ratio:selectedAspectRatio,flow_composition:composition,flow_layer_source:composition==='foreground'?draftLayerSource():'from_still',channel_profile_id:selectedChannelId||undefined});current=created.id;project=created;if(voiceDraft.file){showNotice('Загружаю озвучку…');await startVoiceProject(api,current);}else await api(`/projects/${current}/analyse`,{target:clampSceneCount(draftTarget)});await listProjects();await refresh(true);showNotice('Проект создан. Обработка выполняется в FrameForge.');}
 
 function renderWelcome(){const empty=el('section',undefined,'empty-state'),inner=el('div');inner.append(el('div','✦','orb'),el('h1','Создайте раскадровку'),el('p','Разберите сценарий автоматически или загрузите готовые промпты для сцен.','muted'),button('Импортировать промпты TXT / JSON',()=>openPromptImport({dialog,api,notice:showNotice,onCreated:async created=>{current=created.id;project=created;view='studio';history.replaceState(null,'',`?project=${created.id}`);await listProjects();render();}}),'primary','import-prompts'));empty.append(inner);main.append(empty);}
 function renderHead(subtitle){
@@ -1025,6 +1050,7 @@ function renderAnalysisState(){
 
 function referenceSubjects(){const ids=new Set(project.character_reference_ids||[]);return project.characters.filter(c=>ids.has(c.id));}
 function renderSubjects(){
+ if(project.visual_format==='science_atlas')return;
  const isIllustration=project.mode==='illustration',isObjects=project.mode==='objects';
  const box=workspace(`${isObjects?'Объекты и архитектура':'Персонажи'} · ${project.characters.length}`,isObjects?'◇':'♙');
  if(isIllustration){box.append(el('p','В этом режиме постоянные референсы не используются — каждая сцена иллюстрируется самостоятельно.','muted'));main.append(box);return;}
@@ -1035,7 +1061,12 @@ function renderSubjects(){
  if(other.length){const registry=el('details'),summary=el('summary',`Справочный реестр: ${other.length}`);registry.append(summary,el('p','Эти записи не участвуют в автоматическом отборе эталонов. Здесь доступны сохранённые портреты и ручные операции.','muted'));renderList(other,registry);if(other.some(c=>c.id===selectedSubject))registry.open=true;box.append(registry);}
  const subject=project.characters.find(c=>c.id===selectedSubject)||subjects[0];
  if(subject)box.append(renderSubjectDetail(subject,isObjects));
- if(project.character_selection_issues?.length)box.append(el('p','Состав участников требует проверки: '+project.character_selection_issues.map(e=>e.message).join('; '),'error'));
+ if(project.character_selection_issues?.length){
+  const issues=el('details'),summary=el('summary',`Замечания к составу участников (${project.character_selection_issues.length})`);
+  issues.append(summary);
+  for(const issue of project.character_selection_issues)issues.append(el('p',issue.message,'error'));
+  box.append(issues);
+ }
  main.append(box);
 }
 function latestSubjectAsset(id){return [...project.generations].reverse().find(g=>g.character_id===id&&g.state==='succeeded'&&g.asset_id&&!g.snapshot.wardrobe_key)?.asset_id;}
@@ -1219,12 +1250,12 @@ function renderLocationDetail(location){const detail=el('div',undefined,'subject
 function editLocation(location){const body=modal('Описание локации'),description=field('Постоянные детали: фасад, окна, двери, планировка',location.description,'textarea');body.append(description.box,button('Сохранить',async()=>{await action(`/locations/${location.id}/edit`,{revision:location.revision,description:description.input.value},'Описание локации обновлено. Создайте новые варианты.');dialog.close();},'primary'));}
 
 function renderProps(){
-  if(['dynamic','illustration'].includes(project.mode))return;
+  if(project.visual_format!=='science_atlas'&&['dynamic','illustration'].includes(project.mode))return;
   // Keep non-story records visible so the user can correct classification in
   // either direction. Only story props are sent to generation and references.
   const props=project.props||[];
   if(!props.length)return;
-  const box=workspace('Реквизит и классификация','🏺'),tabs=el('div',undefined,'subject-tabs');
+  const box=workspace(project.visual_format==='science_atlas'?'Библиотека иллюстраций':'Реквизит и классификация','🏺'),tabs=el('div',undefined,'subject-tabs');
   box.id='prop-editor';
   for(const prop of props){
     const tab=button('',()=>{selectedProp=prop.id;render();},'subject-pill'+(prop.id===selectedProp?' selected':'')+(prop.locked?' locked':''),`prop-${prop.id}`);
@@ -1517,6 +1548,7 @@ async function startAllScenes(){
   if(sceneBatchStarting)return;
   const pid=current,isFlow=currentSettings?.image_backend==='flow';
   if(!pid||!project?.scenes?.length)throw Error('Сначала откройте проект с кадрами.');
+  if(project.visual_format==='science_atlas'&&!isFlow)throw Error('Для генерации иллюстраций научпопа выберите Google Flow в настройках.');
   const count=project.scenes.length;
   const sameProject=()=>{
     if(current!==pid||project?.id!==pid||(currentSettings?.image_backend==='flow')!==isFlow)
@@ -1633,10 +1665,12 @@ function renderBatchActionBar(){
   if(portraits?.missing.length)generateBtnText='▶ Сгенерировать портреты во Flow';
   else if(portraits?.ready.length)generateBtnText='✓ Подтвердить портреты и запустить сцены';
   else if(isFlow)generateBtnText=flowComposition(project.id)==='foreground'?'▶ Сгенерировать сцены с параллаксом':'▶ Сгенерировать все сцены во Flow';
+  if(project.visual_format==='science_atlas')generateBtnText='▶ Сгенерировать иллюстрации научпопа';
   const generateBtn = button(generateBtnText, startAllScenes, 'primary batch-generate-btn', 'generate-scenes');
   generateBtn.disabled=sceneBatchStarting;
   right.append(generateBtn);
 
+  if(project.visual_format==='science_atlas')right.append(button('Собрать весь ролик',buildFullScienceFromStudio,'primary','science-build-full-studio'));
   const animatedCount = project.scenes.filter(s => s.video_asset_id).length;
   const chooseAnimations = button(`Выбрать анимацию · ${animatedCount} / ${project.scenes.length}`, () => {
     const picker = main.querySelector('[data-testid="animation-model-toolbar"]');
@@ -1765,7 +1799,14 @@ function sceneVariants(scene){
   }
   return [...images.values()];
 }
-function sceneDisplayGeneration(scene){const active=project.generations.find(g=>g.id===scene.active_generation_id);return active||[...sceneGenerations(scene)].reverse().find(g=>g.state==='succeeded'&&g.asset_id);}
+function sceneDisplayGeneration(scene){
+ const active=project.generations.find(g=>g.id===scene.active_generation_id);
+ if(scene.data?.science_atlas?.presentation==='visual_first'){
+   if(scene.stale)return null;
+   return active?.current_scene_compatible===false?null:active||[...sceneGenerations(scene)].reverse().find(g=>g.current_scene_compatible!==false&&g.state==='succeeded'&&g.asset_id);
+ }
+ return active||[...sceneGenerations(scene)].reverse().find(g=>g.state==='succeeded'&&g.asset_id);
+}
 function isForgottenCitiesProject(){return project?.channel_profile?.profile_type==='forgotten_cities';}
 function stillApprovalRequired(){return project?.still_approval_required===true;}
 function sceneStillApproved(scene){return !stillApprovalRequired()||scene?.still_approval?.status==='approved';}
@@ -1871,10 +1912,10 @@ function renderCompactAnimationControl(scene,display,anim){
   const [badgeText,badgeClass]=animationBadge(scene,anim);
   const badge=el('span',badgeText,'scene-anim-badge '+badgeClass); badge.dataset.testid=`scene-anim-badge-${scene.position}`;
   const locked=animationLocked(scene),chosen=omniSelection().has(scene.id);
-  const effectiveEngine=locked?(anim.selected_engine||'ken_burns'):(chosen?selectedAnimationEngine():'ken_burns');
+  const effectiveEngine=locked?(anim.selected_engine||'ken_burns'):selectedAnimationEngine();
   const model=animationModelName(locked?anim.selected_engine:selectedAnimationEngine());
   const chooseLabel=el('label',undefined,'omni-choice'),choose=el('input');choose.type='checkbox';choose.checked=locked?['omni_flash','veo_lite'].includes(effectiveEngine):chosen;choose.disabled=locked||animationRunBusy;choose.dataset.testid=`omni-select-${scene.position}`;choose.setAttribute('aria-label',`Анимировать кадр ${scene.position} в ${model}`);
-  chooseLabel.append(choose,el('strong',locked&&effectiveEngine==='ken_burns'?'2.5D':model),el('small',locked?(scene.video_asset_id?'Видео готово':['queued_omni','queued_veo'].includes(anim.status)?'Ожидает запуска в Flow':'Генерируется в Flow'):'Отметьте для Google Flow'));
+  chooseLabel.append(choose,el('strong',locked&&effectiveEngine==='ken_burns'?'Видео':model),el('small',locked?(scene.video_asset_id?'Видео готово':['queued_omni','queued_veo'].includes(anim.status)?'Ожидает запуска в Flow':'Генерируется в Flow'):'Отметьте для Google Flow'));
   choose.onchange=()=>{
     choose.checked?omniSelection().add(scene.id):omniSelection().delete(scene.id);
     const disclosure=box.querySelector('.animation-disclosure');
@@ -1885,13 +1926,44 @@ function renderCompactAnimationControl(scene,display,anim){
     box.replaceWith(replacement);
     replacement.querySelector('input[type="checkbox"]')?.focus({preventScroll:true});
   };
-  if(!locked){const motion=smartMotion(scene.data,scene.position),manual=anim.ken_burns_mode==='manual';badge.textContent=chosen?`Выбран ${model}`:`2.5D · ${manual?(Object.fromEntries(KB_MOTION_OPTIONS)[anim.ken_burns_preset]||'ручная камера'):'Авто: '+(Object.fromEntries(KB_MOTION_OPTIONS)[motion.preset]||'мягкое движение').toLowerCase()}`;badge.className='scene-anim-badge '+(chosen?(effectiveEngine==='veo_lite'?'badge-veo':'badge-omni'):'badge-kb');}
-  row.append(chooseLabel,badge);
+
+  row.append(chooseLabel);
+  if(!locked){
+    const launch=button('Анимировать в Flow',()=>runSingleAnimation(scene.id,selectedAnimationEngine()),'success-button',`animation-test-cloud-${scene.position}`);
+    launch.disabled=animationRunBusy||!approved||!display?.asset_id||scene.stale;
+    launch.title=!approved?'Сначала утвердите выбранное изображение.':`Отправить только кадр ${scene.position} в ${model}`;
+    row.append(launch);
+  }else if(effectiveEngine!=='ken_burns')row.append(badge);
   if(scene.video_asset_id||anim.status==='completed'){
     const remove=el('button','Удалить видео','btn-delete-scene-video'); remove.type='button';remove.dataset.testid=`delete-video-btn-${scene.position}`;remove.setAttribute('aria-label',`Удалить видео кадра ${scene.position} и вернуть статичное изображение`);
     remove.onclick=async e=>{e.stopPropagation();try{await api(`/scenes/${scene.id}/animation/delete`,{});showNotice(`Видео кадра ${scene.position} удалено.`);await refresh(true);}catch(error){showNotice(`Ошибка удаления: ${error.message||error}`,true);}}; row.append(remove);
   }
   box.append(row);
+  if(scene.data?.science_atlas&&(scene.data.science_atlas.asset_keys||[]).length===1){
+    const atlas=scene.data.science_atlas,motion=selectOptions([['','Прежняя постановка'],['slide_explain','Раскрытие со смещением'],['staged_explain','Пояснения без смещения'],['focus_explain','Спокойный крупный план'],['detail_explain','Общий вид и деталь']],atlas.presentation_motion||'','science-motion-'+scene.position,'Постановка научпопа');
+    const direction=selectOptions([['left','Иллюстрация влево'],['right','Иллюстрация вправо']],atlas.slide_direction||'left','science-direction-'+scene.position,'Направление');
+    const save=button('Сохранить постановку',async()=>{await api(`/scenes/${scene.id}/edit`,{revision:scene.current_revision,data:{science_atlas:{...atlas,presentation_motion:motion.value,slide_direction:direction.value,frame_density:motion.value?'filled':'legacy',presentation_locked:true}}});await refresh(true);showNotice('Постановка сохранена. Нажмите «Пересобрать» у кадра, затем соберите его видео.');},'secondary');
+    box.append(motion,direction,save);
+  }
+  if(scene.data?.science_atlas&&(!scene.video_asset_id||anim.selected_engine==='ken_burns')){
+    const local=button(scene.video_asset_id?'Пересобрать видео со схемами':'Собрать видео со схемами',()=>scene.video_asset_id?rebuildScientificScene(scene.id):runSingleAnimation(scene.id,'ken_burns'),'secondary',`science-video-${scene.position}`);
+    local.disabled=animationRunBusy||pendingCloudAnimation(scene)||!approved||!display?.asset_id||scene.stale;
+    local.title='Локальная сборка на видеокарте: иллюстрации, подписи и схемы по таймингам. Без генерации в Flow.';box.append(local);
+    if(scene.video_asset_id&&(anim.science_renderer_version||0)<(scene.data.science_atlas.presentation_motion==='slide_explain'?6:scene.data.science_atlas.frame_density==='filled'?7:4))box.append(el('small','Обновлена анимация схем и текста — пересоберите этот ролик.','muted'));
+  }
+  const staging=scene.data.compact_staging||{};
+  const action=scene.data.science_atlas?.focus||staging.action||scene.data.audit_visual_direction||scene.data.composition||scene.data.beat;
+  if(action){
+    const description=el('div',undefined,'scene-action-description');
+    description.append(el('strong','В кадре'),el('p',action));
+    box.append(description);
+  }
+  const source=scene.data.source_quote;
+  if(source){
+    const binding=el('details',undefined,'scene-narration-binding');
+    binding.append(el('summary','Текст сценария'),el('p',source));
+    box.append(binding);
+  }
   if(!scene.video_asset_id&&['generating_omni','generating_veo'].includes(anim.status)&&anim.error){
     const recovery=el('div',undefined,'animation-single-actions');
     recovery.append(button('Загрузить найденное видео',()=>triggerFlowMp4Upload(scene),'secondary',`animation-recover-upload-${scene.position}`));
@@ -1925,13 +1997,7 @@ function renderCompactAnimationControl(scene,display,anim){
     const resume=button('Продолжить в Flow',()=>resumeSceneAnimation(scene),'success-button',`animation-resume-${scene.position}`);
     const pending=el('div',undefined,'animation-single-actions');pending.append(resume);box.append(pending,el('small','Видео ещё не создано. Откройте вкладку Flow с подключённым мостом и продолжите запуск.','animation-single-hint'));
   }
-  if(!locked){
-    const trials=el('div',undefined,'animation-single-actions');
-    const cloud=button(`Проба в ${animationModelName(selectedAnimationEngine())}`,()=>runSingleAnimation(scene.id,selectedAnimationEngine()),'success-button',`animation-test-cloud-${scene.position}`);
-    const local=button('Проба 2.5D',()=>runSingleAnimation(scene.id,'ken_burns'),'secondary',`animation-test-local-${scene.position}`);
-    for(const control of [cloud,local]){control.disabled=animationRunBusy||!approved||!display?.asset_id||scene.stale;if(!approved)control.title='Сначала нажмите «Утвердить» под выбранным изображением.';}
-    trials.append(cloud,local);box.append(trials,el('small',!approved?'Сначала нажмите «Утвердить» под выбранным изображением.':'Проба запускает только этот кадр. Результат появится на карточке.','animation-single-hint'));
-  }
+  if(effectiveEngine==='ken_burns')return box;
   const disclosure=document.createElement('details'); disclosure.className='animation-disclosure'; disclosure.dataset.testid=`scene-animation-disclosure-${scene.position}`;
   disclosure.open=animationDisclosures.get(project.id+':'+scene.id)||false;
   const summary=el('summary',effectiveEngine==='omni_flash'?'Качество и длительность Omni':'Настроить движение камеры');summary.setAttribute('aria-label',`Настроить анимацию кадра ${scene.position}`); disclosure.append(summary);
@@ -2040,7 +2106,7 @@ function renderSceneCard(scene){
       locBadge.addEventListener('click',(e)=>{e.stopPropagation();selectedLocation=loc.id;render();});
       badges.append(locBadge);
     }
-  } else {
+  } else if(!scene.data?.science_atlas){
     const noLocBadge=el('div',undefined,'scene-ref-badge scene-ref-missing-loc');
     noLocBadge.title='Локация не привязана к кадру. Нажмите, чтобы выбрать или изменить.';
     noLocBadge.style.cssText='background:#7f1d1d;color:#fca5a5;border:1px dashed #ef4444;border-radius:4px;padding:2px 6px;font-size:10px;font-weight:bold;cursor:pointer;display:inline-flex;align-items:center;gap:3px;';
@@ -2086,8 +2152,8 @@ function renderSceneCard(scene){
     animBtn.innerHTML='<span>▷</span><span>Анимировать</span>';
   }
   if(!sceneStillApproved(scene)){animBtn.disabled=true;animBtn.title='Сначала утвердите текущий вариант изображения.';}
-  animBtn.addEventListener('click',(e)=>{e.stopPropagation();const control=card.querySelector('.scene-animation-control'),disclosure=control?.querySelector('.animation-disclosure');if(disclosure){disclosure.open=true;control.scrollIntoView({behavior:'smooth',block:'nearest'});}else animateSceneModal(scene);});
-  const regenerateBtn=el('button','↻ Перегенерировать','scene-regenerate-btn');
+  animBtn.addEventListener('click',(e)=>{e.stopPropagation();if(scene.data?.science_atlas){card.querySelector('.scene-animation-control')?.scrollIntoView({behavior:'smooth',block:'nearest'});return;}const control=card.querySelector('.scene-animation-control'),disclosure=control?.querySelector('.animation-disclosure');if(disclosure){disclosure.open=true;control.scrollIntoView({behavior:'smooth',block:'nearest'});}else animateSceneModal(scene);});
+  const regenerateBtn=el('button',scene.data?.science_atlas?'↻ Пересобрать':'↻ Перегенерировать','scene-regenerate-btn');
   regenerateBtn.type='button';
   regenerateBtn.dataset.testid=`regenerate-scene-${scene.position}`;
   regenerateBtn.addEventListener('click',async(e)=>{
@@ -2095,7 +2161,9 @@ function renderSceneCard(scene){
     if(regenerateBtn.disabled)return;
     regenerateBtn.disabled=true;
     try{
-      if(currentSettings?.image_backend==='flow'){
+      if(scene.data?.science_atlas){
+        const result=await api(`/projects/${current}/science-atlas/assemble`,{});showNotice(`Пересборка: ${result.assembled}; ждут иллюстраций: ${result.waiting}.`);await refresh(true);
+      }else if(currentSettings?.image_backend==='flow'){
         const bridge=await api('/bridge/v1/status');
         if(!bridge.connected)throw Error('Мост Google Flow не подключён. Откройте FrameForge Bridge.');
         if(bridge.scoped_scene_start!==true)throw Error('Обновите userscript FrameForge Flow Bridge и перезагрузите вкладку Flow: запуск отдельного кадра недоступен.');
@@ -2117,7 +2185,7 @@ function renderSceneCard(scene){
 
   const body=el('div',undefined,'scene-body');
   body.append(el('h3',`Кадр ${scene.position}`));
-  if(!locName){
+  if(!locName&&!scene.data?.science_atlas){
     const unres=el('div',undefined,'scene-unresolved-location');
     unres.style.cssText='display:inline-flex;align-items:center;gap:4px;margin:4px 0 8px;padding:3px 8px;background:rgba(239,68,68,0.15);border:1px dashed #ef4444;border-radius:6px;font-size:11px;color:#fca5a5;cursor:pointer;';
     unres.title='Локация не привязана (заменена пустой строкой). Нажмите, чтобы настроить локацию сцены.';
@@ -2970,7 +3038,7 @@ async function animateSceneModal(scene){
   body.append(veoSec);
 }
 function renderQueue(){const queueGenerations=project.generations.filter(g=>!g.purpose.startsWith('edit_'));renderHead('Состояние генерации');const box=workspace('Очередь задач','◌'),controls=batchControls(true),list=el('div',undefined,'queue-list');if(controls){box.append(controls,el('p','Пауза завершит сохранение текущего кадра и остановит следующие задачи.','muted'));}if(!queueGenerations.length)list.append(el('p','Задач пока нет.','muted'));for(const generation of [...queueGenerations].reverse()){const item=el('div',undefined,'queue-item'),scene=project.scenes.find(s=>s.id===generation.scene_id),subject=project.characters.find(c=>c.id===generation.character_id),location=project.locations?.find(item=>item.id===generation.location_id),prop=project.props?.find(item=>item.id===generation.prop_id),title=scene?`Кадр ${scene.position}`:subject?subject.name:location?`Эталон: ${location.name}`:prop?`Эталон: ${prop.name}`:'Разбор сценария',copy=el('div'),failed=Boolean(generation.error);copy.append(el('strong',title),el('div',failed?generation.error:(generation.progress.stage||generation.purpose),failed?'error':'muted'));if(isActiveGeneration(generation))copy.append(progressMeter(generation,true));item.append(copy,el('span',labels[generation.state]||generation.state,generation.state==='failed'?'error':''));list.append(item);}box.append(list);main.append(box);}
-function renderExport(){renderHead('Монтаж и сохранение ролика');const holder=el('div');main.append(holder);const epoch=montageRenderId;montageProjectId=project.id;mountMontage(holder,{project,api,downloadZip:downloadExport,notice:showNotice}).then(editor=>{if(epoch!==montageRenderId){editor.dispose();return;}montageView=editor;}).catch(error=>{if(epoch===montageRenderId){montageProjectId=null;holder.textContent=error.message;showNotice(error.message,true);}});}
+function renderExport(){renderHead('Монтаж и сохранение ролика');const holder=el('div');main.append(holder);const epoch=montageRenderId;montageProjectId=project.id;montageReady=mountMontage(holder,{project,api,downloadZip:downloadExport,notice:showNotice}).then(editor=>{if(epoch!==montageRenderId){editor.dispose();return;}montageView=editor;}).catch(error=>{if(epoch===montageRenderId){montageProjectId=null;holder.textContent=error.message;showNotice(error.message,true);}});}
 async function downloadExport(){const response=await fetch('/api/export/'+current);if(!response.ok){const error=await response.json();throw Error(error.error);}const url=URL.createObjectURL(await response.blob()),link=el('a');link.href=url;link.download='frames.zip';link.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}
 
 
@@ -3025,9 +3093,6 @@ async function settings(){
   flowModelSelect.value=config.flow_image_model || '🍌 Nano Banana 2';
   flowModelBox.append(flowModelSelect);
 
-  const bridgeUrlBox=el('label');bridgeUrlBox.append(el('span','Ссылка на ваш FrameForge Bridge'));
-  const bridgeUrlInput=el('input');bridgeUrlInput.type='url';bridgeUrlInput.placeholder='https://flow.google.com/project/…/tool/…';bridgeUrlInput.value=config.flow_project_url||'';
-  fields.flow_project_url={input:bridgeUrlInput,box:bridgeUrlBox};bridgeUrlBox.append(bridgeUrlInput);flowSection.append(bridgeUrlBox);
   flowSection.append(flowModelBox, el('p','Генерация через Flow работает через подключённый FrameForge Bridge; отдельный API key не требуется.','muted'));
   body.append(flowSection);
 
@@ -3609,6 +3674,12 @@ function manageProjects(initial='projects',confirmId=null){return openProjectMan
 document.querySelector('#projects-button')?.addEventListener('click',()=>manageProjects());
 const channelsBtn=document.querySelector('#channels-button');
 if(channelsBtn)channelsBtn.addEventListener('click',()=>openChannelsModal().catch(error=>showNotice(error.message,true)));
+document.querySelector('#finished-video-button').addEventListener('click', async ()=>{
+  try {
+    const {openFinishedVideo}=await import('/finished-video.mjs');
+    openFinishedVideo(modal('Обработка готового видео'),api);
+  } catch(error) {showNotice(error.message,true);}
+});
 document.querySelector('#settings-button').addEventListener('click',()=>settings().catch(error=>showNotice(error.message,true)));
 document.querySelectorAll('.step').forEach(item=>item.addEventListener('click',()=>{view=item.dataset.view;render();}));
 try{

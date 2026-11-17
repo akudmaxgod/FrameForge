@@ -669,7 +669,7 @@ class MediaMatching:
 
         # 4. Query all completed segments from media library
         segments = self.db.all("""
-            SELECT s.*, i.original_name, i.media_type, i.file_path, i.thumbnail_path, i.duration_ms AS media_duration_ms
+            SELECT s.*, i.original_name, i.media_type, i.file_path, i.thumbnail_path, i.sha256 AS media_sha256, i.duration_ms AS media_duration_ms
             FROM media_segments s
             JOIN media_library_items i ON i.id=s.item_id
             WHERE s.project_id=? AND s.analysis_status='completed'
@@ -690,7 +690,8 @@ class MediaMatching:
             }
 
         proposals = []
-        usage_counts = {}
+        from .media_single_use import tokens,used_in_project
+        used_materials=used_in_project(self.service,project_id,doc)
         total_duration_ms = timeline.get("duration_ms", 0)
         accumulated_insert_ms = 0.0
 
@@ -734,7 +735,7 @@ class MediaMatching:
                 candidates = ((None, segment, []) for segment in segments)
             for description_score, seg, evidence in candidates:
                 item_id = seg["item_id"]
-                if usage_counts.get(item_id, 0) >= 2:
+                if tokens(seg) & used_materials:
                     continue
 
                 if quick:
@@ -819,7 +820,7 @@ class MediaMatching:
                     continue
 
                 accumulated_insert_ms += insert_dur
-                usage_counts[best_candidate["item_id"]] = usage_counts.get(best_candidate["item_id"], 0) + 1
+                used_materials.update(tokens(best_candidate))
 
                 if best_eval['status'] == 'matched':
                     confirmed += 1
@@ -840,6 +841,7 @@ class MediaMatching:
                     "candidate_segment": {
                         "segment_id": best_candidate["id"],
                         "item_id": best_candidate["item_id"],
+                        "media_sha256": best_candidate.get("media_sha256"),
                         "original_name": best_candidate["original_name"],
                         "media_type": best_candidate["media_type"],
                         "file_path": best_candidate["file_path"],

@@ -193,6 +193,12 @@ class Service:
         return self._decode_review(self.db.one('SELECT * FROM reviews WHERE generation_id=?', (generation_id,)))
 
     def _generation_matches_current_scene(self, generation, scene):
+        if scene.get('data',{}).get('science_atlas'):
+            snapshot=generation.get('snapshot') or {}
+            if isinstance(snapshot,str):snapshot=json.loads(snapshot)
+            if not snapshot.get('science_auto'):return False
+            from .science_atlas_render import hydrate,snapshot_matches_plan
+            return snapshot_matches_plan(snapshot,hydrate(self,scene))
         if generation.get('scene_revision') == scene.get('current_revision'):
             return True
         old_row = self.db.one('SELECT data FROM scene_revisions WHERE scene_id=? AND revision=?',
@@ -216,6 +222,11 @@ class Service:
             return {'status': 'pending_review', 'reason': 'stale_generation'}
         review = self.generation_review(generation_id)
         snapshot=json.loads(generation['snapshot'])
+        if snapshot.get('science_auto') and self.project(scene['project_id']).get('visual_format')=='science_atlas':
+            from .science_atlas_render import hydrate,snapshot_matches_plan
+            matched=snapshot_matches_plan(snapshot,hydrate(self,scene))
+            return {'status':'approved' if matched else 'pending_review',
+                    'automatic':True,'generation_id':generation_id,'asset_id':generation['asset_id']}
         source_review=snapshot.get('source_fidelity_review') or {}
         enforce_source = visual_reviews_enabled() and (self.settings().get('source_contract_enabled') is True or self.settings().get('google_queue_enabled') is True) and (
             bool((snapshot.get('scene') or {}).get('forgotten_cities_prompt_contract')) or bool(source_review))
@@ -1043,6 +1054,12 @@ class Service:
         aspect_ratio = data.get('aspect_ratio', '16:9')
         if aspect_ratio not in ASPECT_RATIOS:
             aspect_ratio = '16:9'
+        visual_format=data.get('visual_format','standard')
+        if visual_format not in ('standard','science_atlas'):raise DomainError('Неизвестный визуальный формат.')
+        if visual_format=='science_atlas':
+            from .science_atlas import STYLE
+            data={**data,'mode':'illustration','style':STYLE,'flow_composition':'standard','flow_layer_source':'from_still','channel_profile_id':None}
+            mode='illustration';camera_mode='cinema';aspect_ratio='16:9'
         flow_composition = data.get('flow_composition', 'standard')
         if flow_composition not in ('standard', 'foreground'):
             raise DomainError('Неизвестный режим движения сцены.')
@@ -1085,8 +1102,8 @@ class Service:
         project_id = uid()
         with self.db.transaction() as connection:
             connection.execute(
-                'INSERT INTO projects(id,title,idea,story,style,mode,camera_mode,camera_pacing,aspect_ratio,flow_composition,flow_layer_source,channel_profile_id,channel_profile_version_id,channel_character_version_map,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                (project_id, title, idea, story, style, mode, camera_mode, camera_pacing, aspect_ratio, flow_composition, layer_source,
+                'INSERT INTO projects(id,title,idea,story,style,mode,camera_mode,camera_pacing,aspect_ratio,flow_composition,flow_layer_source,visual_format,channel_profile_id,channel_profile_version_id,channel_character_version_map,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (project_id, title, idea, story, style, mode, camera_mode, camera_pacing, aspect_ratio, flow_composition, layer_source, visual_format,
                  channel_profile_id, channel_version_id, dump(char_version_map), now())
             )
         self.update_camera_settings(project_id, {'camera_custom': data.get('camera_custom', '')})
@@ -1215,6 +1232,8 @@ class Service:
                 generation['current_scene_compatible'] = bool(
                     current_scene and self._generation_matches_current_scene(generation, current_scene)
                 )
+                if (current_scene and current_scene['data'].get('science_atlas') and current_scene.get('active_generation_id')==generation['id'] and not generation['current_scene_compatible']):
+                    current_scene['stale']=True;current_scene['stale_reason']='Изменились иллюстрации или научный макет; требуется пересборка.'
                 generation['review'] = self._decode_review(
                     self.db.one('SELECT * FROM reviews WHERE generation_id=?', (generation['id'],))
                 )
@@ -1273,6 +1292,10 @@ class Service:
         return result
 
     def _current_project_preflight(self, project):
+        if project.get('visual_format')=='science_atlas':
+            from .science_planner import project_preflight
+            scientific=project_preflight(project)
+            if scientific is not None:return scientific
         from .prompt_import import metadata as prompt_import_metadata, preflight as prompt_import_preflight
         if prompt_import_metadata(project):
             return prompt_import_preflight(project)
@@ -1358,6 +1381,9 @@ class Service:
 
     def import_analysis(self, project_id, analysis, version):
         project = self.project(project_id)
+        if project.get('visual_format') == 'science_atlas':
+            from .science_sequence import arrange_analysis
+            analysis = arrange_analysis(analysis)
         validate_analysis(analysis, project['story'])
         from .story_reliability import require_consistent_analysis
         require_consistent_analysis(analysis,project['story'])
@@ -1982,6 +2008,10 @@ class Service:
             raise DomainError('Выбранный режим не использует этот тип постоянных эталонов.', 409)
         profile = {**(profile or self.profile()), 'width': 768, 'height': 432}
         style = project['style']
+        if project.get('visual_format')=='science_atlas':
+            from .science_atlas import STYLE
+            return {'profile':profile,'prompt':STYLE+' Subject: '+prop['description'],'references':[],
+                    'uninhabited':False,'style':STYLE,'template_version':1,'science_asset':True}
         prompt = (f"Style: {style}. Prop reference object: {prop['name']}. "
                   f"Object description: {prop['description']}. "
                   "SOLO OBJECT REFERENCE ONLY. Isolated persistent prop object on a clean, neutral plain studio background. "
@@ -2029,6 +2059,9 @@ class Service:
             connection.execute('UPDATE props SET locked=1,references_json=? WHERE id=?', (dump(norm_refs), prop_id))
             self._cancel_superseded_reference(connection, 'prop', prop_id, revision)
             self.db.event(connection, prop['project_id'], 'prop_locked', {'id': prop_id})
+        if self.project(prop['project_id']).get('visual_format')=='science_atlas':
+            from .science_atlas_render import assemble_project
+            assemble_project(self,prop['project_id'])
         return self.prop(prop_id)
 
     def unlock_prop(self, prop_id):
@@ -2073,7 +2106,11 @@ class Service:
         prop = self.prop(prop_id)
         project_id = prop['project_id']
         project = self.project(project_id)
-        processed_data = self._normalize_reference_image(image_bytes)
+        if project.get('visual_format')=='science_atlas':
+            from .science_atlas_render import normalize_material
+            processed_data,output_size=normalize_material(image_bytes)
+        else:
+            processed_data=self._normalize_reference_image(image_bytes);output_size=(768,432)
 
         generation_id = uid()
         asset_id = uid()
@@ -2090,7 +2127,7 @@ class Service:
             'purpose': 'prop',
             'snapshot': snapshot,
             'sha256': hashlib.sha256(processed_data).hexdigest(),
-            'output_size': (768, 432),
+            'output_size': output_size,
             'saved_at': now(),
             'state': 'succeeded',
             'source': 'upload_google_flow',
@@ -2111,7 +2148,7 @@ class Service:
 
             connection.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?)',
                 (asset_id, project_id, generation_id, relative,
-                 hashlib.sha256(processed_data).hexdigest(), 768, 432, len(processed_data)))
+                 hashlib.sha256(processed_data).hexdigest(), *output_size, len(processed_data)))
 
             if lock:
                 connection.execute('UPDATE props SET locked=1,references_json=? WHERE id=?', (dump(references), prop_id))
@@ -2120,6 +2157,13 @@ class Service:
             else:
                 self.db.event(connection, project_id, 'generation_completed', {'id': generation_id, 'state': 'succeeded'})
 
+        if self.project(project_id).get('visual_format')=='science_atlas':
+            try:
+                from .science_atlas_render import assemble_project
+                assemble_project(self,project_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Science scene assembly failed; illustration preserved')
         return self.prop(prop_id)
 
     def scene(self, scene_id):
@@ -2515,6 +2559,14 @@ class Service:
 
     def scene_snapshot(self, scene, allow_unlocked=False, *, _project=None, _narrative_grounder=None, _resources=None, _camera_plan=None):
         project = _project if _project is not None else self.project(scene['project_id'])
+        if project.get('visual_format')=='science_atlas':
+            from .science_atlas import STYLE
+            return {'profile':self.profile(),'project_id':project['id'],'scene_id':scene['id'],
+                'scene_revision':scene['current_revision'],'scene':scene['data'],'prompt':STYLE,
+                'references':[],'reference_omissions':[],'uninhabited':False,'expected_people':None,
+                'people_count_unresolved':True,'camera_plan':None,'style':STYLE,'world':'','template_version':1,
+                'source_contract':{'status':'bound'},
+                'flow_wire':{'version':'source-scene-wire/1','prompt':STYLE,'error':'Сцена научпопа собирается локально из иллюстраций; используйте общую очередь материалов.'}}
         scene = {**scene, 'data': {**scene['data'], 'camera_sequence_index': max(0, scene.get('position', 1)-1)}}
         from .prompt_import import metadata as prompt_import_metadata, snapshot as imported_snapshot
         if prompt_import_metadata(project):
@@ -2819,6 +2871,8 @@ class Service:
 
     def batch(self, project_id, idempotency_key, scene_ids=None):
         required_text(idempotency_key, 'Ключ запроса', 100)
+        if self.project(project_id).get('visual_format')=='science_atlas':
+            raise DomainError('Кадры научпопа собираются локально. Запустите общую очередь иллюстраций или пересборку сцен.')
         self.project(project_id)
         self.accept_ready_references(project_id)
         preflight = self.project_preflight(project_id)
@@ -3489,13 +3543,14 @@ class Service:
                             reference_jobs.append({'id': job['id'], 'target_id': target['id'],
                                 'name': target['name'], 'purpose': kind, 'generation_role': 'reference',
                                 'prompt': job['snapshot']['prompt'], 'locked': False,
-                                'aspect_ratio': '1:1' if kind == 'prop' else '16:9'})
+                                'aspect_ratio': '16:9' if detail.get('visual_format')=='science_atlas' else '1:1' if kind == 'prop' else '16:9'})
             # The bridge consumes explicit queued jobs, never all story resources.
             if not include_all_scenes:
                 scenes = [s for s in scenes if self.db.one("SELECT id FROM generations WHERE scene_id=? AND state='queued' AND cancel_requested=0", (s['scene_id'],))]
         return {
             'project_id': project_id,
             'profile_type': 'forgotten_cities' if forgotten else self._project_profile_type(project_id),
+            'visual_format': detail.get('visual_format','standard'),
             'reference_jobs': reference_jobs,
             'title': detail['title'],
             'scenes': scenes,
@@ -3915,8 +3970,12 @@ class Service:
             anim['actual_duration_seconds'] = video_metadata['duration_seconds']
             snapshot['video_metadata'] = video_metadata
         if local_render_info is not None:
-            anim.update(source='ken_burns', ken_burns_preset=local_render_info['safe_crop']['actual_preset'],
-                        safe_crop=local_render_info['safe_crop'], ken_burns_renderer_version=local_render_info['renderer_version'])
+            if scene['data'].get('science_atlas'):
+                anim.update(source='science_atlas',science_renderer_version=local_render_info['renderer_version'],
+                            compute_device=local_render_info.get('compute_device'))
+            else:
+                anim.update(source='ken_burns', ken_burns_preset=local_render_info['safe_crop']['actual_preset'],
+                            safe_crop=local_render_info['safe_crop'], ken_burns_renderer_version=local_render_info['renderer_version'])
             if local_render_info.get('reason'):
                 anim['ken_burns_reason'] = local_render_info['reason']
             snapshot['local_render_info'] = local_render_info
@@ -4624,15 +4683,12 @@ class Service:
                 raise DomainError('Omni 1.1 Flash поддерживает 4, 6, 8 или 10 секунд.')
         scene = self.scene(scene_id)
         project_id = scene['project_id']
-        # Local engine selection needs settings, narration timing and scene
-        # count, not a complete narrative/source audit of every image.
-        if engine == 'ken_burns':
-            project = self.project(project_id)
-            project['animation_settings'] = json.loads(project.get('animation_settings') or '{}')
-            project['scenes'] = [self.scene(row['id']) for row in self.db.all(
-                'SELECT id FROM scenes WHERE project_id=? ORDER BY position',(project_id,))]
-        else:
-            project = self.detail(project_id)
+        # Engine selection reads settings and scene metadata, never a full
+        # narrative/source audit of all images for each selected frame.
+        project = self.project(project_id)
+        project['animation_settings'] = json.loads(project.get('animation_settings') or '{}')
+        project['scenes'] = [self.scene(row['id']) for row in self.db.all(
+            'SELECT id FROM scenes WHERE project_id=? ORDER BY position',(project_id,))]
         settings = validate_animation_settings(project.get('animation_settings'))
 
         if settings['plan_mode'] == 'economy' and engine == 'veo_lite':
@@ -4735,7 +4791,7 @@ class Service:
                 'scene_id': scene_id, 'engine': engine, 'credit_cost': current_anim.get('credit_cost', 0)
             })
 
-        reloaded = {'scenes':[{'data':json.loads(row['data'])} for row in self.db.all('SELECT r.data FROM scenes s JOIN scene_revisions r ON r.scene_id=s.id AND r.revision=s.current_revision WHERE s.project_id=?',(project_id,))]} if engine == 'ken_burns' else self.detail(project_id)
+        reloaded = {'scenes':[{'data':json.loads(row['data'])} for row in self.db.all('SELECT r.data FROM scenes s JOIN scene_revisions r ON r.scene_id=s.id AND r.revision=s.current_revision WHERE s.project_id=?',(project_id,))]}
         veo_total = sum(1 for s in reloaded['scenes'] if s['data'].get('animation', {}).get('selected_engine') == 'veo_lite')
         kb_total = sum(1 for s in reloaded['scenes'] if s['data'].get('animation', {}).get('selected_engine') == 'ken_burns')
         omni_total = sum(1 for s in reloaded['scenes'] if s['data'].get('animation', {}).get('selected_engine') == 'omni_flash')
@@ -5016,7 +5072,7 @@ class Service:
                 if is_economy and veo_queued_count >= max_veo:
                     anim['status'] = 'failed'
                     anim['error'] = f'Превышен лимит {max_veo} кадров Veo 3.1 Lite в экономном режиме.'
-                elif not pr_scene.get('ready_for_flow') or not source_asset_id:
+                elif not self._flow_animation_source_ready(scene,pr_scene) or not source_asset_id:
                     err = pr_scene.get('flow_error') or 'Кадр не готов к отправке в Flow.'
                     anim['status'] = 'failed'
                     anim['error'] = err
@@ -5135,13 +5191,19 @@ class Service:
                 out_rel = f"projects/{project_id}/videos/ken_burns_{s_id[:8]}_{uid()}.mp4"
                 out_abs = self.root / out_rel
                 motion = smart_ken_burns_motion(scene['data'], scene['position']) if anim.get('ken_burns_mode') != 'manual' else None
-                render_res = render_ken_burns_video(
-                    img_bytes, out_abs,
-                    preset_name=motion['preset'] if motion else anim.get('ken_burns_preset') or anim.get('safe_crop', {}).get('actual_preset', 'slow_zoom_in'),
-                    duration=anim.get('duration_seconds', 5),
-                    fps=project.get('animation_settings', {}).get('fps', 24),
-                    target_size=(1920,1080)
-                )
+                if scene['data'].get('science_atlas'):
+                    from .science_atlas_render import hydrate,render_video
+                    render_res=render_video(hydrate(self,scene),lambda aid:self.root/self.asset(aid)['path'],out_abs,
+                        duration=anim.get('duration_seconds',6),fps=24,target_size=(1920,1080))
+                    motion=None
+                else:
+                    render_res = render_ken_burns_video(
+                        img_bytes, out_abs,
+                        preset_name=motion['preset'] if motion else anim.get('ken_burns_preset') or anim.get('safe_crop', {}).get('actual_preset', 'slow_zoom_in'),
+                        duration=anim.get('duration_seconds', 5),
+                        fps=project.get('animation_settings', {}).get('fps', 24),
+                        target_size=(1920,1080)
+                    )
 
                 if motion: render_res['reason'] = motion['reason']
                 try:
@@ -5158,6 +5220,17 @@ class Service:
         if regenerate_local or local_only:
             return {'project_id': project_id, 'scenes': results}
         return self.animation_status(project_id)
+
+    def _flow_animation_source_ready(self,scene,image_prompt):
+        if not scene.get('data',{}).get('science_atlas'):
+            return bool(image_prompt.get('ready_for_flow'))
+        # Scientific image generation is local composition; cloud animation
+        # consumes the already assembled image, not an image-generation prompt.
+        if scene.get('stale') or not scene.get('active_generation_id'):return False
+        generation=self.db.one('SELECT * FROM generations WHERE id=?',(scene['active_generation_id'],))
+        if not generation or not generation.get('asset_id') or not self._generation_matches_current_scene(generation,scene):return False
+        asset=self.db.one('SELECT project_id,path,width,height FROM assets WHERE id=?',(generation['asset_id'],))
+        return bool(asset and asset['project_id']==scene['project_id'] and asset['width'] and asset['height'] and (self.root/asset['path']).is_file())
 
     def animation_jobs(self, project_id):
         project = self.detail(project_id)
@@ -5176,7 +5249,7 @@ class Service:
             engine = anim.get('selected_engine')
             status = anim.get('status')
             pr_scene = prompt_by_scene_id.get(scene['id'], {})
-            ready = pr_scene.get('ready_for_flow', False)
+            ready = self._flow_animation_source_ready(scene,pr_scene)
 
             if self._requires_still_approval(project_id):
                 approval = self._current_still_approval(scene)

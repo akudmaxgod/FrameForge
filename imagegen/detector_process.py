@@ -54,7 +54,7 @@ def main():
         import torch
         from ultralytics import YOLO
         torch.set_num_threads(2)
-        result = YOLO(args.model)(args.image, device='cpu', imgsz=640,
+        result = YOLO(args.model)(args.image, device='cuda:0', imgsz=640,
                                   conf=args.confidence, verbose=False, save=False)[0]
         count = count_instances(result)
     print('FF_DETECTOR_RESULT:' + json.dumps({'count': count, 'raw_count': len(result.boxes)}))

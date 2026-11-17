@@ -1,0 +1,41 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {chromium} from 'playwright-core';
+const root=new URL('../',import.meta.url).pathname.replace(/^\/(.:)/,'$1');
+const python='C:/Users/Administrator/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe';
+const edge='C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+function fixture(){return new Promise((resolve,reject)=>{
+ const child=spawn(python,['tests/ui_fixture_server.py'],{cwd:root,stdio:['ignore','pipe','pipe']});
+ let output='';const timer=setTimeout(()=>reject(Error(output||'fixture timeout')),15000);
+ child.stdout.on('data',data=>{output+=data;const m=output.match(/READY (http:\/\/\S+) (\S+)/);if(m){clearTimeout(timer);resolve({child,url:m[1],projectId:m[2]});}});
+ child.stderr.on('data',data=>output+=data);
+});}
+test('FF shows bridge status and dispatches start for selected project', {timeout:30000},async t=>{
+ const f=await fixture();t.after(()=>f.child.kill());
+ const browser=await chromium.launch({headless:true,executablePath:edge});t.after(()=>browser.close());
+ const page=await browser.newPage();await page.goto(f.url);
+ await page.getByTestId('backend-flow').click();
+ await page.getByTestId('flow-image-model').locator('option').first().waitFor();
+ assert.deepEqual(await page.getByTestId('flow-image-model').locator('option').allTextContents(),['🍌 Nano Banana 2 Lite','🍌 Nano Banana 2','🍌 Nano Banana Pro']);
+ assert.doesNotMatch(await page.locator('#controls').innerText(),/до\s*\d+\s*референс|Референсы не отбрасываются/i);
+ assert.equal(await page.getByTestId('flow-image-model').inputValue(),'🍌 Nano Banana 2');
+ await page.getByTestId('flow-image-model').selectOption('🍌 Nano Banana Pro');
+ await page.waitForFunction(() => document.querySelector('#notice')?.textContent.includes('Nano Banana Pro'));
+ const settings=await (await fetch(f.url+'/api/settings')).json();
+ assert.equal(settings.flow_image_model,'🍌 Nano Banana Pro');
+ await page.locator('#project-select').selectOption(f.projectId);
+ await page.getByTestId('flow-bridge-check').waitFor();
+ assert.match(await page.locator('#flow-bridge-status').innerText(),/не подключён/);
+ const sendHeartbeat = () => fetch(f.url+'/api/bridge/v1/heartbeat',{method:'POST',headers:{'Content-Type':'application/json','X-Client':'google-flow'},body:JSON.stringify({project_id:f.projectId,flow_project_id:'d72dddb5-c45a-4375-8026-d3e5db47d807',adapter_connected:true,status:'Готов',running:false})});
+ const response=await sendHeartbeat();
+ assert.equal(response.status,200);
+ await page.getByTestId('flow-bridge-check').click();
+ await page.waitForFunction(() => document.querySelector('#flow-bridge-status')?.innerText.includes('Мост подключён'));
+ assert.match(await page.locator('#flow-bridge-status').innerText(),/Мост подключён/);
+ await page.getByTestId('flow-bridge-start').click();
+ const status=await (await fetch(f.url+'/api/bridge/v1/status')).json();
+ assert.equal(status.pending_command,'start');
+ assert.equal(status.project_id,f.projectId);
+ assert.equal(await page.getByTestId('flow-bridge-open').count(),1);
+});

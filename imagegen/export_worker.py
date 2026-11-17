@@ -1,3 +1,6 @@
+import copy
+from .gpu_pixels import video_frame as gpu_video_frame, image_from_video as gpu_video_image
+from .gpu_pixels import blend as gpu_blend
 """Bounded-memory H.264/AAC exports using the application's FFmpeg libraries."""
 import hashlib
 import json
@@ -53,7 +56,8 @@ def white_fade(c,time_ms):
 
 class VideoReader:
     def __init__(self, path, seconds):
-        self.container = av.open(str(path))
+        from av.codec.hwaccel import HWAccel
+        self.container = av.open(str(path),hwaccel=HWAccel('cuda',allow_software_fallback=False))
         stream = self.container.streams.video[0]
         self.origin = float((stream.start_time or 0) * stream.time_base)
         self.container.seek(int((seconds+self.origin)/stream.time_base), stream=stream, backward=True)
@@ -67,15 +71,11 @@ class VideoReader:
         frame = self.previous or self.next
         if frame is None:
             raise ValueError('Не удалось декодировать видеоклип.')
-        source = frame.to_image()
+        source = gpu_video_image(frame)
         if source.size == size:
             return source
-        if fill:
-            return ImageOps.fit(source, size, Image.Resampling.BICUBIC)
-        image = ImageOps.contain(source, size, Image.Resampling.BICUBIC)
-        canvas = Image.new('RGB',size,'black')
-        canvas.paste(image,((size[0]-image.width)//2,(size[1]-image.height)//2))
-        return canvas
+        from .gpu_pixels import fit
+        return fit(source,size,fill)
 
     def close(self):
         self.container.close()
@@ -129,7 +129,9 @@ class AudioReader:
 
 
 def render(service, document, output, progress, cancelled, size=(1280,720)):
+    from .gpu_pixels import effects as apply_effects
     timeline = normalize(document)
+    effects = document.get('visual_effects') or {}
     duration = timeline['duration_ms']
     frames = math.ceil(duration*24/1000)
     videos, audios = {}, {}
@@ -141,10 +143,10 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
         return paths[aid]
     try:
         with av.open(str(output),'w',format='mp4',options={'movflags':'+faststart'}) as out:
-            video = out.add_stream('libx264',rate=24)
+            video = out.add_stream('h264_nvenc',rate=24)
             video.width,video.height=size
             video.pix_fmt='yuv420p'
-            video.options={'crf':'20','preset':'veryfast'}
+            video.options={'preset':'p4','cq':'20','rc':'vbr'}
             audio = out.add_stream('aac',rate=RATE) if use_audio else None
             if audio:
                 audio.layout='stereo'
@@ -171,10 +173,15 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
                 canvas = black
                 for c in active:
                     cid=c['edit_clip_id']
-                    seconds=(c['trim_in_ms']+(time_ms-c['start_ms'])*c.get('playback_rate',1))/1000
+                    seconds=((time_ms-c['start_ms']) if c.get('science_atlas') else c['trim_in_ms']+(time_ms-c['start_ms'])*c.get('playback_rate',1))/1000
                     if cid not in videos:
                         if c.get('media_type')=='image':
-                            if c.get('foreground_effect'):
+                            if c.get('science_atlas'):
+                                from .science_atlas_render import ScienceReader
+                                atlas=copy.deepcopy(c['science_atlas'])
+                                atlas.setdefault('illustration_motion',{'kind':'push_in','strength':.07})['duration_seconds']=c.get('base_duration_ms',c['duration_ms'])/1000
+                                videos[cid]=ScienceReader(atlas,path)
+                            elif c.get('foreground_effect'):
                                 from .montage_foreground import ForegroundReader
                                 videos[cid] = ForegroundReader(path(c['source_image_asset_id']), c, path)
                             else:
@@ -182,17 +189,22 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
                                 videos[cid] = StillReader(path(c['source_image_asset_id']), c)
                         else:videos[cid]=VideoReader(path(c['source_video_asset_id']),seconds)
                     if c.get('media_type')!='image':seconds=min(seconds,max(c['trim_in_ms']/1000,c['trim_out_ms']/1000-.001))
-                    image=videos[cid].image(seconds,size,fill=c.get('framing')=='fill')
+                    reader=videos[cid]
+                    image=reader.gpu_image(seconds,size) if getattr(reader,'slide',False) else reader.image(seconds,size,fill=c.get('framing')=='fill')
                     fade=white_fade(c,time_ms)
-                    if fade:image=Image.blend(image,white,fade)
+                    if fade:image=gpu_blend(image,white,fade)
                     if c.get('illustrative'):
+                        from .gpu_pixels import cuda
+                        if isinstance(image,cuda().ndarray):image=Image.fromarray(cuda().asnumpy(image))
                         image=illustrative_label(image.copy())
                     alpha = opacity(c, time_ms)
                     if alpha >= 1:
                         canvas = image
                     elif alpha > 0:
-                        canvas = Image.blend(canvas, image, alpha)
-                frame=av.VideoFrame.from_image(canvas)
+                        canvas = gpu_blend(canvas, image, alpha)
+                if active and effects:
+                    canvas = apply_effects(canvas, effects, index)
+                frame=gpu_video_frame(canvas)
                 frame.pts=index
                 frame.time_base=Fraction(1,24)
                 for packet in video.encode(frame):
@@ -298,11 +310,12 @@ class ExportWorker:
                 raise DomainError(f"Обновите источник сцены {(scene or {}).get('position','?')}: медиа отсутствует или устарело.",409)
         # Capability check does not install anything on export.
         try:
-            av.Codec('libx264','w');av.Codec('aac','w')
+            av.Codec('h264_nvenc','w');av.Codec('aac','w')
         except Exception as error:
             raise DomainError('Установите зависимости FrameForge (PyAV с FFmpeg H.264/AAC).',503) from error
         with self.lock, self.db.transaction() as conn:
-            row=conn.execute("SELECT id FROM edit_exports WHERE project_id=? AND edit_revision=? AND status IN ('queued','running')",(project_id,edit['revision'])).fetchone()
+            states="('queued','running','completed')" if data.get('request_key') else "('queued','running')"
+            row=conn.execute(f"SELECT id FROM edit_exports WHERE project_id=? AND edit_revision=? AND status IN {states} ORDER BY created_at DESC LIMIT 1",(project_id,edit['revision'])).fetchone()
             if row:
                 job=row['id']
             else:

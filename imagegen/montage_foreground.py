@@ -1,3 +1,4 @@
+from .gpu_pixels import resize as gpu_resize, affine as gpu_affine, rotate as gpu_rotate, paste as gpu_paste
 """Prepare project-owned layers and evaluate foreground motion on the clip clock."""
 import base64
 import binascii
@@ -208,14 +209,12 @@ def pulse(t, peak, strength):
     return strength * math.exp(-.5 * ((t - peak) / .075) ** 2)
 
 def key_foreground(rgb):
-    import numpy as np
-
-    raw = np.asarray(rgb, dtype=np.int16)
-    neutral = np.maximum(raw[:, :, 0], raw[:, :, 2])
-    green = raw[:, :, 1] - neutral
-    alpha = np.clip((78 - green) / 52, 0, 1)
-    raw[:, :, 1] = np.minimum(raw[:, :, 1], neutral + np.where(green > 22, 14, 255))
-    return np.dstack((raw, np.rint(alpha * 255))).astype(np.uint8)
+    from .gpu_pixels import cuda
+    cp=cuda();raw=cp.asarray(rgb,dtype=cp.int16)
+    neutral=cp.maximum(raw[:,:,0],raw[:,:,2]);green=raw[:,:,1]-neutral
+    alpha=cp.clip((78-green)/52,0,1)
+    raw[:,:,1]=cp.minimum(raw[:,:,1],neutral+cp.where(green>22,14,255))
+    return cp.asnumpy(cp.dstack((raw,cp.rint(alpha*255))).astype(cp.uint8))
 
 
 class ForegroundReader:
@@ -251,20 +250,19 @@ class ForegroundReader:
             overscan = 1 / (1 - max(abs(self.effect['shift_x']), abs(self.effect['shift_y'])) - .006)
             zoomed = math.ceil(width * overscan), math.ceil(height * overscan)
             self.padding = (zoomed[0] - width) / 2, (zoomed[1] - height) / 2
-            self.padded_layer = self.foreground.resize(zoomed, Image.Resampling.BICUBIC)
+            self.padded_layer = gpu_resize(self.foreground,zoomed)
             px, py = self.padding
-            plate = self.background.resize(zoomed, Image.Resampling.BICUBIC)
-            plate = plate.transform((width, height), Image.Transform.AFFINE, (1, 0, px, 0, 1, py),
-                                    resample=Image.Resampling.BICUBIC)
-            self.frame.paste(plate, self.origin)
+            plate = gpu_resize(self.background,zoomed)
+            plate = gpu_affine(plate,(width,height),(1,0,px,0,1,py))
+            gpu_paste(self.frame,plate, self.origin)
             return
-        self.frame.paste(self.background.resize((width, height), Image.Resampling.BICUBIC), self.origin)
+        gpu_paste(self.frame,gpu_resize(self.background,(width, height)), self.origin)
         self.original = self.frame
         if self.effect['mode'] == 'drift':
             self.original = Image.new('RGB', size, 'black')
-            self.original.paste(self.source.resize((width, height), Image.Resampling.BICUBIC), self.origin)
+            gpu_paste(self.original,gpu_resize(self.source,(width, height)), self.origin)
         if self.foreground is not None:
-            layer = self.foreground.resize((width, height), Image.Resampling.BICUBIC)
+            layer = gpu_resize(self.foreground,(width, height))
             if self.effect['mode']=='parallax':
                 import numpy as np
                 pad_x, pad_y = math.ceil(width*.03)+2, math.ceil(height*.03)+2
@@ -306,16 +304,15 @@ class ForegroundReader:
             stream = self.motion.container.streams.video[0]
             motion = self.motion.image(t * self.effect['motion_seconds'], (stream.width, stream.height))
             frame = self.frame.copy()
-            frame.paste(motion.resize((self.width, self.height), Image.Resampling.BICUBIC), self.origin)
+            gpu_paste(frame,gpu_resize(motion,(self.width, self.height)), self.origin)
             return frame
         frame = self.frame.copy()
         if self.effect['mode']=='parallax':
             x = self.width * self.effect['shift_x'] * (t-.5)
             y = self.height * self.effect['shift_y'] * (t-.5)
             pad_x,pad_y = self.padding
-            moving = self.padded_layer.transform((self.width,self.height), Image.Transform.AFFINE,
-                (1,0,pad_x-x,0,1,pad_y-y), resample=Image.Resampling.BICUBIC)
-            frame.paste(moving,self.origin,moving)
+            moving = gpu_affine(self.padded_layer,(self.width,self.height),(1,0,pad_x-x,0,1,pad_y-y))
+            gpu_paste(frame,moving,self.origin,moving)
             return frame
         strength = self.effect['strength']
         if self.effect['mode'] == 'paired':
@@ -329,8 +326,8 @@ class ForegroundReader:
                         left = (rgb.width - rgb.height) // 2
                         rgb = rgb.crop((left, 0, left + rgb.height, rgb.height))
                     layer = Image.fromarray(key_foreground(np.asarray(rgb)), 'RGBA')
-                    layer = layer.resize((self.width, self.height), Image.Resampling.BILINEAR)
-                    frame.paste(layer, self.origin, layer)
+                    layer = gpu_resize(layer,(self.width, self.height))
+                    gpu_paste(frame,layer, self.origin, layer)
                 return frame
             x, y = self.layer_origin
             pivot = (self.origin[0] + self.width * self.effect['pivot_x'] - x,
@@ -341,11 +338,10 @@ class ForegroundReader:
             layer = self.layer
             if abs(angle) > .001:
                 padded = Image.new('RGBA', (layer.width + 2*padding, layer.height + 2*padding))
-                padded.paste(layer, (padding, padding))
-                layer = padded.rotate(-angle, Image.Resampling.BICUBIC,
-                                      center=(pivot[0]+padding, pivot[1]+padding))
+                gpu_paste(padded,layer, (padding, padding))
+                layer = gpu_rotate(padded,-angle,(pivot[0]+padding,pivot[1]+padding))
                 x, y = x - padding, y - padding
-            frame.paste(layer, (x, y), layer)
+            gpu_paste(frame,layer, (x, y), layer)
         elif self.foreground is not None:
             shift = drift(t, self.width, strength)
             if shift < .5:
@@ -355,15 +351,13 @@ class ForegroundReader:
             span = max(1, self.height * (self.effect['bottom'] - self.effect['top']))
             slope = shift / span
             # Shear the cutout so that the point where it touches the ground stays fixed.
-            moving = self.layer.transform((self.layer.width + math.ceil(shift) + 1, self.layer.height),
-                Image.Transform.AFFINE, (1, slope, -slope * pivot, 0, 1, 0),
-                resample=Image.Resampling.BICUBIC)
-            frame.paste(moving, (x, y), moving)
+            moving = gpu_affine(self.layer,(self.layer.width+math.ceil(shift)+1,self.layer.height),(1,slope,-slope*pivot,0,1,0))
+            gpu_paste(frame,moving, (x, y), moving)
         else:
             opacity = pulse(t, self.effect['peak'], strength)
             if opacity >= .003:
                 x, y = self.glint_origin
-                frame.paste((255, 229, 166), (x, y, x + self.glint.width, y + self.glint.height),
+                gpu_paste(frame,(255, 229, 166), (x, y, x + self.glint.width, y + self.glint.height),
                             self.glint.point([round(opacity * a) for a in range(256)]))
         return frame
 

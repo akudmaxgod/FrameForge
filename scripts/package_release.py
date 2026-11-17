@@ -39,6 +39,7 @@ def main():
            'Start.cmd','Install.ps1','Build.ps1','Prepare-Update.ps1','StopFrameForge.ps1',
            'InstallVoice.ps1','InstallSemanticFit.ps1','InstallQwen.ps1','components-lock.json',
            '.github']
+    names += ['requirements-gpu.txt','InstallGPU.ps1','requirements-release-lock.txt','THIRD_PARTY_LICENSES']
     selected=[]
     for name in names:
         path=ROOT/name

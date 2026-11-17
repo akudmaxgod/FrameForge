@@ -66,6 +66,17 @@ def _proper_neighbor(token):
     parses=morph.parse(token)
     return any(('Surn' in p.tag or 'Patr' in p.tag) for p in parses) or parses[0].tag.POS is None
 
+@lru_cache(maxsize=2048)
+def _unknown_name_forms(label):
+    if not re.fullmatch(r'[А-ЯЁ][а-яё]{1,}[бвгджзклмнпрстфхцчшщ]', label):
+        return ()
+    from .named_event_coverage import _morph
+    morph = _morph()
+    if not morph or str(morph.parse(label)[0].tag) != 'UNKN':
+        return ()
+    return tuple(label.casefold() + ending for ending in ('а', 'у', 'ом', 'е'))
+
+
 def mentions(text, characters, diagnostics=None):
     """Return non-overlapping longest, unambiguous identity spans."""
     spans=list(WORD.finditer(text));normalized=tuple(lemma(m.group()) for m in spans)
@@ -75,7 +86,10 @@ def mentions(text, characters, diagnostics=None):
             key=words(label)
             for start in range(len(spans)-len(key)+1):
                 end=start+len(key)
-                if normalized[start:end]!=key:continue
+                if normalized[start:end] != key:
+                    token = spans[start].group()
+                    if len(key) != 1 or not token[0].isupper() or token.casefold() not in _unknown_name_forms(label):
+                        continue
                 # A short name inside a different/unknown explicit full name is unsafe.
                 if len(key)==1:
                     neighbors=[k for k in (start-1,end) if 0<=k<len(spans) and _proper_neighbor(spans[k].group())
@@ -100,8 +114,42 @@ def mentions(text, characters, diagnostics=None):
         occupied.update(range(start,end))
     return sorted(selected,key=lambda item:item[1])
 
+_REPORTED_CONTENT = re.compile(
+    r'\b(?:узна(?:л[аи]?|ли|ёт|ют|в)|выясни\w*|услыша\w*|поня(?:л[аи]?|ли|в)|'
+    r'сообщ\w*|рассказ\w*|сказа\w*|говор\w*|предупреди\w*|'
+    r'прочита\w*|долож\w*|написа\w*|известно)'
+    r'(?:\s+[\w-]+){0,5}(?P<ru>,\s*что\s+)'
+    r'|\b(?:learn\w*|heard|hear\w*|report\w*|said|says?|told|tell\w*|'
+    r'inform\w*|discover\w*|warn\w*|wrote|writ\w*)'
+    r'(?:\s+[\w-]+){0,5}(?P<en>\s+that\s+)',
+    re.I,
+)
+
+
+@lru_cache(maxsize=2048)
+def reported_content(text):
+    spans = []
+    cursor = 0
+    for match in _REPORTED_CONTENT.finditer(text):
+        if match.start() < cursor:
+            continue
+        stop = re.search(r'[.!?;\n]', text[match.end():])
+        cursor = match.end() + stop.start() if stop else len(text)
+        spans.append((match.start('ru' if match['ru'] else 'en'), match.end(), cursor, bool(match['ru'])))
+    return tuple(spans)
+
+
+def visual_reporting_action(text):
+    # Retain the act of reporting and omit the scene described in the report.
+    for start, _, stop, russian in reversed(reported_content(text)):
+        text = text[:start] + (' новость' if russian else ' the news') + text[stop:]
+    return text
+
+
 def presence_kind(text,start,end):
     """Explicit grammatical mention cues; a death/action itself is not excluded."""
+    if any(begin <= start < stop for _, begin, stop, _ in reported_content(text)):
+        return 'mentioned'
     prefix=text[max(0,start-100):start].casefold()
     suffix=text[end:end+50].casefold()
     if re.search(r'(?:портрет\w*|стату\w*|бюст\w*|изображени\w*|portrait of|statue of)\s+(?:\w+\s+){0,3}$',prefix):return 'depicted'

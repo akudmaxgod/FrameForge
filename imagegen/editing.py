@@ -97,7 +97,7 @@ class Editing:
         row = self.db.one('SELECT * FROM project_edits WHERE project_id=?', (project_id,))
         document = json.loads(row['document_json']) if row else {'schema_version': 1, 'clips': [], 'transitions': [], 'audio_tracks': [], 'source_audio': False, 'export_settings': {'width':1920,'height':1080,'fps':24}}
         export = self.db.one('SELECT id FROM edit_exports WHERE project_id=? ORDER BY created_at DESC LIMIT 1', (project_id,))
-        return {'revision': row['revision'] if row else 0, 'document': document, 'timeline': normalize(document), 'sources': self.sources(project_id, document), 'last_export_id': (export or {}).get('id')}
+        return {'revision': row['revision'] if row else 0, 'document': document, 'timeline': normalize(document), 'sources': self.sources(project_id, document), 'last_export_id': (export or {}).get('id'), 'visual_effects_supported': True}
 
     def get_document(self, project_id):
         return self.get(project_id)['document']
@@ -152,6 +152,10 @@ class Editing:
         if not isinstance(document, dict) or document.get('schema_version') != 1:
             raise DomainError('Неподдерживаемая схема монтажа.')
         doc = copy.deepcopy(document)
+        effects = doc.get('visual_effects', {})
+        if (not isinstance(effects, dict) or set(effects) - {'old_film', 'light_leaks'}
+                or any(type(value) is not int or not 0 <= value <= 100 for value in effects.values())):
+            raise DomainError('Интенсивность визуального эффекта должна быть от 0 до 100.')
         if not isinstance(doc.get('clips'), list) or len(doc['clips']) > 2000:
             raise DomainError('Недопустимый список клипов.')
         known = {s['id'] for s in self.db.all('SELECT id FROM scenes WHERE project_id=?', (project_id,))}
@@ -193,6 +197,17 @@ class Editing:
                 if not c.get('excluded') or not original:
                     raise
                 duration = original['source_duration_ms']
+            if c.get('science_atlas'):
+                from .science_atlas import LAYOUTS
+                atlas=c['science_atlas']
+                if media_type!='image' or atlas.get('version')!='science-atlas/1' or atlas.get('layout') not in LAYOUTS:raise DomainError('Некорректный макет научпопа.')
+                for item in atlas.get('illustrations',[])+atlas.get('details',[]):
+                    illustration=self.service.asset(item['asset_id'])
+                    if illustration['project_id']!=project_id or not illustration['width'] or not illustration['height']:raise DomainError('Недопустимая иллюстрация научпопа.')
+                    from PIL import Image
+                    with Image.open(self.service.root/illustration['path']) as source:source.verify()
+                from .science_atlas_render import compile_commands
+                c['science_atlas']=compile_commands(atlas)
             if media_type=='image' and (not c.get('source_image_asset_id') or c.get('source_video_asset_id')):
                 raise DomainError('Изображение монтажа должно иметь отдельный источник.')
             if c.get('source_image_asset_id'):
@@ -328,7 +343,9 @@ class Editing:
         selected = data.get('clip_ids')
         changes = []
         for s in scenes:
-            video = s.get('video_asset_id')
+            scientific=bool(s.get('data',{}).get('science_atlas'))
+            cloud_video=scientific and s.get('data',{}).get('animation',{}).get('selected_engine') in ('omni_flash','veo_lite')
+            video = s.get('video_asset_id') if not scientific or cloud_video else None
             image=(self.db.one('SELECT asset_id FROM generations WHERE id=?',(s.get('active_generation_id'),)) or {}).get('asset_id')
             if s.get('stale') or (video and s.get('video_stale')) or (not video and not image):
                 continue
@@ -347,8 +364,10 @@ class Editing:
             generation = self.db.one('SELECT asset_id FROM generations WHERE id=?', (s.get('active_generation_id'),))
             planned_seconds = (s.get('data', {}).get('prompt_timing') or {}).get('duration_seconds', 5)
             planned_ms = round(planned_seconds*1000) if type(planned_seconds) in (int, float) and 1 <= planned_seconds <= 60 else 5000
-            initial_ms = min(duration, planned_ms) if video and s.get('data', {}).get('prompt_timing') else duration if video else planned_ms
+            initial_ms = duration if scientific and video else min(duration, planned_ms) if video and s.get('data', {}).get('prompt_timing') else duration if video else planned_ms
             c = old or {'edit_clip_id':uid(),'scene_id':s['id'],'trim_in_ms':0,'trim_out_ms':initial_ms,'excluded':False,'volume':1,'muted':True}
+            if scientific and video and old and old.get('media_type')=='image':c.update(trim_in_ms=0,trim_out_ms=duration,playback_rate=1,hold_last_ms=0)
+            old_atlas=copy.deepcopy(c.get('science_atlas'))
             if video or c.get('source_image_asset_id') != (generation or {}).get('asset_id'):
                 c.pop('foreground_effect', None)
                 c.pop('foreground_pair_disabled', None)
@@ -357,6 +376,18 @@ class Editing:
             else:
                 c['media_type']='image'
                 attach_pair(c, s, image)
+            if scientific and not video:
+                from .science_atlas_render import hydrate
+                c['science_atlas']=hydrate(self.service,s)
+                if old_atlas and (old_atlas.get('presentation_locked') or old_atlas.get('sequence_arrangement_version',0)>=c['science_atlas'].get('sequence_arrangement_version',0)):
+                    for key in ('presentation_motion','slide_direction','explanatory_labels','frame_density','single_subject_reason','presentation_locked'):
+                        if key in old_atlas:c['science_atlas'][key]=copy.deepcopy(old_atlas[key])
+                if old_atlas and old_atlas.get('cue_timing')=='audio_alignment':
+                    anchors=lambda a:[n.get('source_char_start') for field in ('nodes','elements','annotations') for n in a.get(field,[])]
+                    if anchors(old_atlas)==anchors(c['science_atlas']):
+                        c['science_atlas']['cue_ms']=old_atlas.get('cue_ms',[]);c['science_atlas']['cue_timing']='audio_alignment'
+                c.pop('camera_motion',None);c.pop('foreground_effect',None)
+            elif scientific:c.pop('science_atlas',None)
             if c['trim_out_ms'] > duration or c['trim_in_ms'] >= duration-1000/24:
                 c['trim_out_ms'] = duration
                 c['trim_in_ms'] = min(c['trim_in_ms'], max(0, duration-1000/24))

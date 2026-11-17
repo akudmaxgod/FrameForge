@@ -170,7 +170,19 @@ export class MontageLanes{
       if(frozen){const tail=element('div',undefined,'timeline-freeze');tail.style.left=`${frozen.left_percent}%`;tail.style.width=`${frozen.width_percent}%`;tail.dataset.testid='timeline-freeze';tail.setAttribute('role','img');tail.setAttribute('aria-label',`СТОП-КАДР · ${(frozen.duration_ms/1000).toFixed(2)} с`);tail.append(element('span','СТОП-КАДР'));block.append(tail);block.title+=` · Стоп-кадр ${(frozen.duration_ms/1000).toFixed(2)} с`;}
       if(c.in_kind==='dissolve'&&c.in_ms)block.classList.add('timeline-overlap');this.lanes.video.append(block);
       const next=clips[clips.indexOf(c)+1];
-      if(next){const marker=control('◇',()=>this.quickTransition(c.edit_clip_id,next.edit_clip_id,marker));marker.className='timeline-transition';marker.style.left=`${(c.end_ms-(c.out_kind==='dissolve'?c.out_ms/2:0))/1000*this.scale}px`;marker.title='Быстрый переход · '+(c.out_kind||'cut');marker.setAttribute('aria-label',`Переход после сцены ${label}`);this.lanes.video.append(marker);}
+      if(next){
+        const marker=control('',()=>this.quickTransition(c.edit_clip_id,next.edit_clip_id,marker));
+        const active=c.out_kind!=='cut'&&c.out_ms>0;
+        const join=(c.end_ms+next.start_ms)/2;
+        marker.className='timeline-transition';
+        marker.classList.toggle('has-transition',active);
+        marker.style.left=`${join/1000*this.scale}px`;
+        const titles={dissolve:'Растворение',black:'Через чёрный',white:'Через белый'};
+        marker.title=active?`${titles[c.out_kind]} · ${c.out_ms/1000} с`:'Без перехода';
+        marker.setAttribute('aria-label',`Переход после сцены ${label}`);
+        marker.setAttribute('aria-description',marker.title);
+        this.lanes.video.append(marker);
+      }
     }
     for(const role of ['voice','music']){
       const a=this.doc.audio_tracks.find(t=>t.role===role);

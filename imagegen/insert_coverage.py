@@ -101,7 +101,7 @@ def assert_budget(before, after, value):
         raise DomainError('Вставки превысят выбранную долю таймлайна. Пересчитайте распределение.', 409)
 
 
-def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=()):
+def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=(), used_media=()):
     settings = policy(value)
     if accepted_ids is not None and (not isinstance(accepted_ids, list) or any(not isinstance(v, str) for v in accepted_ids)):
         raise DomainError('Передайте список выбранных вставок.')
@@ -138,17 +138,20 @@ def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=()):
                            'center': (intervals[0][0] + intervals[-1][1]) / 2,
                            'duration': union_ms(intervals), 'status': status})
 
+    from .media_single_use import tokens,used_in_document
+    media_used=set(used_media)|used_in_document(document)
     occupied, used, chosen = list(existing), set(), []
     maximum = total * settings['percent'] / 100 if settings['mode'] == 'limited' else total
     available = sum(c['duration'] for c in candidates)
 
     def affordable(c):
-        return not (c['ids'] & used) and union_ms(occupied + c['intervals']) <= maximum + EPS
+        return not (tokens(c['proposal'].get('candidate_segment') or {}) & media_used) and not (c['ids'] & used) and union_ms(occupied + c['intervals']) <= maximum + EPS
 
     def take(c):
         chosen.append(c)
         occupied.extend(c['intervals'])
         used.update(c['ids'])
+        media_used.update(tokens(c['proposal'].get('candidate_segment') or {}))
         candidates.remove(c)
 
     if settings['distribution'] == 'spread' and candidates and maximum > union_ms(existing):
@@ -169,7 +172,7 @@ def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=()):
         else:
             take(min(fits, key=lambda c: (c['status'] != 'matched', -float(c['proposal'].get('retrieval_score') or 0), c['center'])))
     for c in candidates:
-        skipped[c['proposal']['proposal_id']] = 'coverage_limit' if not (c['ids'] & used) else 'overlapping_segment'
+        skipped[c['proposal']['proposal_id']] = 'duplicate_material' if tokens(c['proposal'].get('candidate_segment') or {}) & media_used else 'coverage_limit' if not (c['ids'] & used) else 'overlapping_segment'
     chosen.sort(key=lambda c: c['center'])
     final = union_ms(occupied)
     summary = {'policy': settings, 'duration_ms': total, 'existing_covered_ms': union_ms(existing),

@@ -72,6 +72,7 @@ class Application:
         self.service = Service(root)
         from .export_worker import ExportWorker
         self.edit_exports = ExportWorker(self.service)
+        self.finished_video = None
         from .montage_voice_fit import MontageVoiceFit
         self.montage_voice_fit = MontageVoiceFit(self.service)
         import sys
@@ -122,7 +123,7 @@ class Application:
             owner=service.db.one('SELECT project_id FROM '+parts[1]+' WHERE id=?',(parts[2],))
             if owner:service.project(owner['project_id'])
         if method == 'GET' and path == '/api/editorial-capabilities':
-            return {'version': 2, 'scoped_scene_batches': True, 'application': 'FrameForge', 'release_version': '0.2.0rc4', 'bridge_version': '0.1.93'}
+            return {'version': 2, 'scoped_scene_batches': True, 'park_unknown_flow_admission': True, 'application': 'FrameForge', 'release_version': '0.2.0rc5', 'bridge_version': '0.1.104'}
         if method == 'GET' and path == '/api/session':
             return {'token': self.token}
         if method == 'GET' and path == '/api/settings':
@@ -305,9 +306,9 @@ class Application:
                     bridge['animation_direction_contract']=data.get('animation_direction_contract') if data.get('animation_direction_contract') == 'image-motion/3' else None
                     bridge['staged_image_batch']=data.get('staged_image_batch') is True
                     concurrency=data.get('image_concurrency',1)
-                    bridge['image_concurrency']=min(4,max(1,concurrency)) if type(concurrency) is int else 1
+                    bridge['image_concurrency']=min(8,max(1,concurrency)) if type(concurrency) is int else 1
                     active=data.get('active_image_requests',0)
-                    bridge['active_image_requests']=min(4,max(0,active)) if type(active) is int else 0
+                    bridge['active_image_requests']=min(8,max(0,active)) if type(active) is int else 0
                 command = bridge['command'] if owns_adapter else None
                 if command and data.get('ack_command_id') == command['id']:
                     bridge['last_ack_command_id'] = command['id']
@@ -569,6 +570,12 @@ class Application:
         if len(parts) >= 3 and parts[:2] == ['api', 'projects']:
             project_id = parts[2]
             service.project(project_id)
+            if len(parts)==5 and parts[3:]==['science-atlas','preview'] and method=='POST':
+                from .science_atlas_render import compile_commands
+                return compile_commands((data or {}).get('plan',{}))
+            if len(parts)==5 and parts[3:]==['science-atlas','assemble'] and method=='POST':
+                from .science_atlas_render import assemble_project
+                return assemble_project(service,project_id)
             if len(parts)==5 and parts[3:]==['voice','narration-text'] and method=='GET':
                 return self.voice.narration_text(project_id)
             if len(parts) == 4 and parts[3] == 'voice':
@@ -634,6 +641,8 @@ class Application:
                         project_id, parts[5], req_data.get('requirement_id'),
                         req_data.get('user_queries'), req_data.get('requested_role'), req_data.get('enabled')
                     )
+                if len(parts) == 5 and parts[4] == 'pixabay-latest' and method == 'GET':
+                    return ms.latest_pixabay_scenario(project_id)
                 if len(parts) == 5 and parts[4] == 'jobs' and method == 'POST':
                     return ms.start_job(project_id, (data or {}).get('plan_id'), (data or {}).get('providers'))
                 if len(parts) == 6 and parts[4] == 'jobs' and method == 'GET':
@@ -767,6 +776,8 @@ class Application:
                         prop = service.db.one('SELECT * FROM media_match_proposals WHERE project_id=? ORDER BY created_at DESC LIMIT 1', (project_id,))
                         if prop:
                             prop['proposals'] = json.loads(prop.get('proposals_json') or '[]')
+                            from .media_single_use import unique_proposals,used_in_project,resolve_proposals
+                            prop['proposals']=unique_proposals(resolve_proposals(service,project_id,prop['proposals']),used_in_project(service,project_id,service.editing.get(project_id)['document']))
                         return prop or {'status': 'none', 'proposals': []}
                     if len(parts) == 7 and method == 'POST':
                         if parts[6] == 'preview':
@@ -929,11 +940,19 @@ class Application:
                             "SELECT id FROM generations WHERE project_id=? AND purpose NOT IN ('analysis','edit_audio') LIMIT 1",
                             (project_id,),
                         ).fetchone():
-                            raise DomainError('Пересборка недоступна после создания изображений или видео. Создайте новый проект.', 409)
+                            if project.get('visual_format')=='science_atlas':
+                                from .science_plan_store import require_replaceable
+                                require_replaceable(service,connection,project_id)
+                            else:
+                                raise DomainError('Пересборка недоступна после создания изображений или видео. Создайте новый проект.', 409)
                         settings = service.settings()
+                        reuse=None
+                        if project.get('visual_format')=='science_atlas':
+                            from .science_plan_reuse import find
+                            reuse=find(service,project)
                         generation_id = service.insert_generation(connection, project_id, 'analysis',
                             {'profile': settings, 'project': project, 'target': target, 'story_analyzer_version': 'deepseek',
-                             'analyzer_version': 'deepseek', 'analysis_rebuild': rebuild})
+                             'analyzer_version': 'deepseek', 'analysis_rebuild': rebuild,**({'pending_analysis':reuse} if reuse else {})})
                     return {'generation_id': generation_id}
                 if action == 'batch':
                     return service.batch(project_id, data['idempotency_key'], data.get('scene_ids'))
@@ -1219,6 +1238,38 @@ def make_server(app, port=8765):
                         raise DomainError('Изображение слоя Flow превышает лимит 12 МБ.', 413)
                     if path.endswith('/edit/foreground-pair') and not 0 < length <= 33_000_000:
                         raise DomainError('Загрузите два слоя размером до 12 МБ каждый.', 413)
+                    if path == '/api/finished-video':
+                        import tempfile
+                        from .finished_video import FinishedVideo
+
+                        if not 0 < length <= 4 * 1024**3:
+                            raise DomainError('Загрузите MP4 размером до 4 ГиБ.', 413)
+                        if self.headers.get('Content-Type', '').split(';')[0] != 'application/octet-stream':
+                            raise DomainError('Ожидается файл MP4.', 415)
+                        with app.mutation_lock:
+                            if app.finished_video is None:
+                                app.finished_video = FinishedVideo(app.service.root)
+                            processor = app.finished_video
+                        processor.directory.mkdir(parents=True, exist_ok=True)
+                        effects = set(filter(None, query_params.get('effects', [''])[0].split(',')))
+                        temporary = None
+                        try:
+                            with tempfile.NamedTemporaryFile(dir=processor.directory, suffix='.upload', delete=False) as upload:
+                                temporary = Path(upload.name)
+                                remaining = length
+                                while remaining:
+                                    block = self.rfile.read(min(remaining, 1024 * 1024))
+                                    if not block:
+                                        raise DomainError('Загрузка видео прервалась.')
+                                    upload.write(block)
+                                    remaining -= len(block)
+                            result = processor.start(temporary, effects)
+                        except Exception:
+                            if temporary is not None:
+                                temporary.unlink(missing_ok=True)
+                            raise
+                        self.send_body(200, dump(result).encode())
+                        return
                     if path.startswith('/api/projects/') and path.endswith('/edit/media-library/upload'):
                         import tempfile
                         from urllib.parse import unquote
@@ -1409,6 +1460,31 @@ def make_server(app, port=8765):
                                 remaining -= len(chunk)
                         return
                     self.send_body(200, (app.service.root / asset['path']).read_bytes(), mime or 'image/png')
+                    return
+                if method == 'GET' and path.startswith('/api/finished-video/'):
+                    import shutil
+                    from .finished_video import FinishedVideo
+
+                    parts = path.strip('/').split('/')
+                    if len(parts) != 3 and parts[3:] != ['download']:
+                        raise DomainError('Обработка не найдена.', 404)
+                    with app.mutation_lock:
+                        if app.finished_video is None:
+                            app.finished_video = FinishedVideo(app.service.root)
+                        processor = app.finished_video
+                    key = parts[2]
+                    if len(parts) == 3:
+                        self.send_body(200, dump(processor.get(key)).encode())
+                        return
+                    file = processor.path(key)
+                    with file.open('rb') as source:
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'video/mp4')
+                        self.send_header('Content-Length', str(file.stat().st_size))
+                        self.send_header('Content-Disposition', 'attachment; filename="frameforge-processed.mp4"')
+                        self.send_header('X-Content-Type-Options', 'nosniff')
+                        self.end_headers()
+                        shutil.copyfileobj(source, self.wfile, 1024 * 1024)
                     return
                 if method == 'GET' and path.startswith('/api/export/'):
                     body = app.service.export(path.split('/')[-1])

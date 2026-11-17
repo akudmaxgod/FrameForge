@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional
 from .db import uid, now, dump
 from .domain import DomainError
 from .editing import normalize
+from .media_single_use import used_in_project,resolve_proposals
 
 class MontageInserts:
     def __init__(self, service):
@@ -31,8 +32,8 @@ class MontageInserts:
         if row.get('voice_binding_hash') and voice and row['voice_binding_hash'] != voice:
             raise DomainError('Озвучка изменилась. Рассчитайте подбор заново.', 409)
         from .insert_coverage import select, animated_scene_ids, policy
-        return {**select(current['document'], json.loads(row['proposals_json']), coverage,
-                        accepted_ids=accepted_proposal_ids, scene_ids=animated_scene_ids(self.service, project_id, policy(coverage))),
+        return {**select(current['document'], resolve_proposals(self.service,project_id,json.loads(row['proposals_json'])), coverage,
+                        accepted_ids=accepted_proposal_ids, scene_ids=animated_scene_ids(self.service, project_id, policy(coverage)),used_media=used_in_project(self.service,project_id,current['document'])),
                 'revision': current['revision']}
 
     def apply_proposals(self, project_id: str, proposal_id: str, accepted_proposal_ids: Optional[List[str]] = None, coverage=None) -> Dict[str, Any]:
@@ -67,14 +68,14 @@ class MontageInserts:
                 conn.execute("UPDATE media_match_proposals SET status='stale', updated_at=? WHERE id=?", (now(), proposal_id))
             raise DomainError("Озвучка или фразы сценария были изменены после формирования предложений. Требуется повторный пересчёт.", 409)
 
-        proposals = json.loads(prop_row["proposals_json"])
+        proposals = resolve_proposals(self.service,project_id,json.loads(prop_row["proposals_json"]))
         if accepted_proposal_ids is not None:
             accepted_set = set(accepted_proposal_ids)
             proposals = [p for p in proposals if p["proposal_id"] in accepted_set]
 
         from .insert_coverage import select, animated_scene_ids, policy
         selection = select(current_edit['document'], proposals, coverage,
-                           accepted_ids=accepted_proposal_ids, scene_ids=animated_scene_ids(self.service, project_id, policy(coverage)))
+                           accepted_ids=accepted_proposal_ids, scene_ids=animated_scene_ids(self.service, project_id, policy(coverage)),used_media=used_in_project(self.service,project_id,current_edit['document']))
         chosen = set(selection['selected_proposal_ids'])
         proposals = [p for p in proposals if p['proposal_id'] in chosen]
         if not proposals:

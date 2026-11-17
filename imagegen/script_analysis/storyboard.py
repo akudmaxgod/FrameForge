@@ -14,7 +14,7 @@ from functools import lru_cache
 
 from razdel import sentenize
 
-VERSION='text-storyboard/4'
+VERSION='text-storyboard/5'
 WORDS=re.compile(r"[^\W_]+(?:[-’'][^\W_]+)*",re.UNICODE)
 
 @lru_cache(maxsize=16000)
@@ -122,10 +122,10 @@ def plan(analysis,story,target,*,flow_composition=None):
     from ..subject_policy import enrich, normalize_scene
     characters=enrich(result.get('characters',[]), result.get('cast_bible'));labels=_labels(characters)
     sentence_starts=[s.start for s in sentences]
-    sentence_context=[];last_actors=[];previous_end=0;identity_issues=[]
+    from ..entity_identity import mentions as identity_mentions, presence_kind, reported_content, visual_reporting_action
+    sentence_context=[];last_actors=[];last_reported=[];previous_end=0;identity_issues=[]
     for s in sentences:
         # A paragraph break alone does not change the subject of an explicit pronoun.
-        from ..entity_identity import mentions as identity_mentions, presence_kind
         issues=[]
         named_spans=identity_mentions(s.text,characters,issues)
         for issue in issues:
@@ -147,9 +147,13 @@ def plan(analysis,story,target,*,flow_composition=None):
             for index in last_actors:
                 actual=character_gender(characters[index])
                 if actual==gender or (actual is None and len(last_actors)==1):antecedents.append(index)
+            if not antecedents:
+                antecedents=[index for index in last_reported if character_gender(characters[index])==gender]
             if len(antecedents)==1:physical=list(dict.fromkeys([antecedents[0],*physical]))
         if physical:last_actors=list(physical)
         elif not pronoun:last_actors=[]
+        last_reported=list(dict.fromkeys(i for i,a,_ in named_spans if i in mentioned
+            and any(begin<=a<stop for _,begin,stop,_ in reported_content(s.text))))
         sentence_context.append((physical,mentioned,depicted))
         previous_end=s.stop
     shots = ('wide shot', 'medium shot', 'medium close-up' if layered else 'close-up')
@@ -168,13 +172,26 @@ def plan(analysis,story,target,*,flow_composition=None):
         parent=max(enumerate(episodes),key=lambda pair:max(0,min(b,pair[1].get('source_end',0))-max(a,pair[1].get('source_start',0))),default=(-1,{}))
         names=[characters[i]['name'] for i in physical]
         cids=[characters[i].get('cast_id') or characters[i].get('id') or characters[i]['name'] for i in physical]
+        has_report = any(reported_content(sentences[n].text) for n in selected)
+        beat = quote
+        if has_report:
+            pieces = []
+            for n in selected:
+                sentence = sentences[n]
+                excerpt = story[max(a, sentence.start):min(b, sentence.stop)]
+                spans = reported_content(sentence.text)
+                if any(sentence.start + begin < b and sentence.start + stop > a
+                       for _, begin, stop, _ in spans):
+                    excerpt = visual_reporting_action(sentence.text)
+                pieces.append(excerpt)
+            beat = ' '.join(pieces).strip()
         loc='';lid=''
         for location in result.get('locations',[]):
-            label=tokens(location['name']);context=tokens(story[complete_a:complete_b])
+            label=tokens(location['name']);context=tokens(visual_reporting_action(story[complete_a:complete_b]))
             if label and any(context[n:n+len(label)]==label for n in range(len(context)-len(label)+1)):
                 loc=location['name'];lid=location.get('id','');break
         frame={
-            'beat':quote,'heading':'','source_start':a,'source_end':b,'source_quote':quote,
+            'beat':beat,'heading':'','source_start':a,'source_end':b,'source_quote':quote,
             'source_alignment':'exact_text_frame','analysis_authority':'deepseek-v2',
             'characters':names,'character_ids':cids,'visible_people':len(names),'raw_visible_people':len(names),
             'population_count_basis':'named_identity_registry',
@@ -189,6 +206,7 @@ def plan(analysis,story,target,*,flow_composition=None):
             'duration_sec':round(max(1,len(re.sub(r'\s+',' ',quote))/15),3),
             'storyboard_frame':{'version':VERSION,'position':number,'semantic_episode':parent[0]+1,
                 'sentence_source':{'start':complete_a,'end':complete_b,'quote':story[complete_a:complete_b]},
+                'reported_content': has_report,
                 'interpretation_status':'source_bound_draft','location_unresolved':not bool(loc),'semantic_accuracy_measured':False},
         }
         frames.append(normalize_scene(frame, characters))

@@ -64,10 +64,19 @@ class MaterialSearchJobManager:
         if not req_rows:
             raise DomainError("В плане нет включённых требований для поиска.", 400)
 
+        plan_options = json.loads(plan_row.get("options_json") or "{}")
+        scenario_pixabay = bool(plan_options.get("pixabay_scenario"))
+
         # Determine target providers
         if not selected_providers:
             opts = json.loads(plan_row.get("options_json") or "{}")
             selected_providers = opts.get("providers", ["pixabay", "commons", "local_library"])
+
+        if scenario_pixabay:
+            selected_providers = ["pixabay"]
+            caps = self.providers["pixabay"].capabilities()
+            if not caps.get("auth_configured"):
+                raise DomainError("Добавьте ключ Pixabay в настройках приложения.", 400)
 
         valid_providers = [p for p in selected_providers if p in self.providers]
         if not valid_providers:
@@ -81,7 +90,7 @@ class MaterialSearchJobManager:
             caps = prov_instance.capabilities() if hasattr(prov_instance, "capabilities") else {}
             if caps.get("manual_only"):
                 continue
-            if is_batch and caps.get("supports_batch") is False:
+            if is_batch and caps.get("supports_batch") is False and not (scenario_pixabay and p == "pixabay"):
                 logger.info("Excluding provider '%s' from multi-segment batch job (supports_batch=False)", p)
                 continue
             filtered_providers.append(p)
@@ -103,6 +112,10 @@ class MaterialSearchJobManager:
             user_q = json.loads(rd.get("user_queries_json") or "[]")
             eff = user_q if user_q else gen_q
             total_queries += len(eff) * len(valid_providers)
+
+        if scenario_pixabay:
+            from .pixabay_scenario import queries
+            total_queries = len(queries(req_rows)) * (2 if plan_options.get("pixabay_media_type", "both") == "both" else 1)
 
         with self.db.transaction() as conn:
             conn.execute(
@@ -474,8 +487,20 @@ class MaterialSearchJobManager:
             total_cand_count = 0
             collected_candidates_by_req: Dict[str, List[Dict[str, Any]]] = {}
 
-            # Phase 1: Searching
-            for r in req_rows:
+            plan = self.db.one("SELECT options_json FROM material_search_plans WHERE id = ?", (plan_id,))
+            options = json.loads(plan.get("options_json") or "{}") if plan else {}
+            scenario_pixabay = bool(options.get("pixabay_scenario"))
+            if scenario_pixabay:
+                from .pixabay_scenario import collect, used_sources
+                def report(done, total, query):
+                    self._update_job_progress(job_id, "running", "searching", done, total, 0, f"Pixabay: {query}")
+                collected_candidates_by_req, processed_q = collect(self.providers["pixabay"], req_rows, options, cancellation, report, used_sources(self.service, project_id))
+                if cancellation.is_set():
+                    return
+                total_cand_count = sum(map(len, collected_candidates_by_req.values()))
+
+            # Phase 1: Searching (bounded Pixabay discovery uses the shared pool above)
+            for r in ([] if scenario_pixabay else req_rows):
                 if cancellation.is_set():
                     self._update_job_progress(job_id, "cancelled", "searching", processed_q, len(req_rows), total_cand_count, "Поиск отменён")
                     return
@@ -546,10 +571,18 @@ class MaterialSearchJobManager:
 
                 # Evaluate candidates with visual verification
                 for it in deduped:
-                    qwen_analysis = self._verify_candidate_visual(it, rd)
+                    if cancellation.is_set():
+                        return
+                    qwen_analysis = None if scenario_pixabay else self._verify_candidate_visual(it, rd)
                     sem_stat, id_stat, r_stat, reasons, score = evaluate_candidate_candidate(
                         it, rd, qwen_analysis=qwen_analysis
                     )
+                    if scenario_pixabay:
+                        if sem_stat == "rejected":
+                            continue
+                        sem_stat = "needs_review"
+                        score = it.get("scenario_relevance", score)
+                        reasons.append("Подбор по теме фразы; проверьте изображение перед применением. Оригинал проверяется при импорте.")
                     cand_id = uid()
                     t_now = now()
 

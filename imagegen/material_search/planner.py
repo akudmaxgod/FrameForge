@@ -89,7 +89,7 @@ class MaterialSearchPlanner:
             raise DomainError("Проект не содержит сцен для поиска материалов.", 400)
 
         options = options or {}
-        preferred_providers = options.get("providers", ["pixabay", "commons", "local_library"])
+        preferred_providers = options.get("preferred_providers") or options.get("providers", ["pixabay", "commons", "local_library"])
         media_type = options.get("media_type", "both")
 
         # 1. Extract logical segments tied to narration
@@ -302,6 +302,10 @@ class MaterialSearchPlanner:
         # 4. Calculate query budget
         total_queries = sum(len(r.effective_queries()) for r in requirements)
         provider_calls = total_queries * len(preferred_providers)
+        if options.get("pixabay_scenario"):
+            from .pixabay_scenario import queries as topic_queries
+            total_queries = len(topic_queries([r.to_dict() for r in requirements]))
+            provider_calls = total_queries * (2 if options.get("pixabay_media_type", "both") == "both" else 1)
 
         return {
             "ok": True,
@@ -311,6 +315,7 @@ class MaterialSearchPlanner:
             "segments_count": len(requirements),
             "total_queries": total_queries,
             "estimated_provider_calls": provider_calls,
+            "options": options_to_save,
             "preferred_providers": preferred_providers,
             "requirements": [r.to_dict() for r in requirements]
         }
@@ -360,6 +365,9 @@ class MaterialSearchPlanner:
 
         opts = json.loads(plan_dict.get("options_json") or "{}")
         total_q = sum(len(r["effective_queries"]) for r in requirements if r["enabled"])
+        if opts.get("pixabay_scenario"):
+            from .pixabay_scenario import queries as topic_queries
+            total_q = len(topic_queries([r for r in requirements if r["enabled"]]))
 
         return {
             "ok": True,
