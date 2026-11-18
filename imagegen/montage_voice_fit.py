@@ -206,6 +206,8 @@ def propose(snap,alignment,policy='hold',*,repair=False):
                 at=scene.get('data',{}).get('source_start',0)+quote.index(support)
                 match=next((w for w in words if w['char_start']<=at<w['char_end'] and w.get('start') is not None),None)
                 if match:atlas['support_reveal_ms']=max(0,offset+match['start']*1000-audio_start-start)
+            from .science_script import bind_audio
+            c['science_atlas']=bind_audio(c['science_atlas'],words,offset-audio_start-start)
             c['science_atlas']['cue_ms']=[next((max(0,offset+w['start']*1000-audio_start-start) for w in words
                 if node.get('source_char_start') is not None and w['char_start']<=node['source_char_start']<w['char_end'] and w.get('start') is not None),None)
                 for node in [*c['science_atlas'].get('nodes',[]),*c['science_atlas'].get('elements',[]),*c['science_atlas'].get('annotations',[])]]

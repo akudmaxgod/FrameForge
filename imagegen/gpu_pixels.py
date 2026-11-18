@@ -36,15 +36,22 @@ def crop_kernel():
 
 class CudaImage:
     def __init__(self,image):
-        cp=cuda();image=image if image.mode in ('RGB','RGBA','L') else image.convert('RGB');self.mode=image.mode;self.data=cp.asarray(np.asarray(image));self.height,self.width=self.data.shape[:2];self.channels=1 if self.data.ndim==2 else self.data.shape[2]
+        cp=cuda()
+        if isinstance(image,cp.ndarray):self.data=image;self.mode='RGBA' if image.shape[-1]==4 else 'RGB'
+        else:
+            image=image if image.mode in ('RGB','RGBA','L') else image.convert('RGB');self.mode=image.mode;self.data=cp.asarray(np.asarray(image))
+        self.height,self.width=self.data.shape[:2];self.channels=1 if self.data.ndim==2 else self.data.shape[2]
         if self.channels==1:self.data=self.data[:,:,None]
         if self.channels==4:self.data[:,:,:3]=cp.rint(self.data[:,:,:3].astype(cp.float32)*self.data[:,:,3:4]/255).astype(cp.uint8)
     def resize(self,size,box=None):
+        cp=cuda();out=self.resize_gpu(size,box)
+        return Image.fromarray(cp.asnumpy(out))
+    def resize_gpu(self,size,box=None):
         cp=cuda();w,h=size;x,y,bw,bh=(0,0,self.width,self.height) if box is None else (box[0],box[1],box[2]-box[0],box[3]-box[1])
         out=cp.empty((h,w,self.channels),dtype=cp.uint8);n=h*w*self.channels
         crop_kernel()(((n+255)//256,),(256,),(self.data,out,np.int32(self.width),np.int32(self.height),np.int32(w),np.int32(h),np.int32(self.channels),np.float32(x),np.float32(y),np.float32(bw),np.float32(bh)))
         if self.channels==4:out[:,:,:3]=cp.clip(cp.rint(out[:,:,:3].astype(cp.float32)*255/cp.maximum(out[:,:,3:4],1)),0,255).astype(cp.uint8)
-        return Image.fromarray(cp.asnumpy(out[:,:,0] if self.channels==1 else out))
+        return out[:,:,0] if self.channels==1 else out
 
 def blend(left,right,alpha):
     cp=cuda();gpu=isinstance(left,cp.ndarray) or isinstance(right,cp.ndarray)
@@ -63,6 +70,19 @@ def fit(image,size,fill=False):
     cp=cuda();out=cp.zeros((size[1],size[0],3),dtype=cp.uint8);x=(size[0]-out_size[0])//2;y=(size[1]-out_size[1])//2
     out[y:y+out_size[1],x:x+out_size[0]]=cp.asarray(np.asarray(result))
     return Image.fromarray(cp.asnumpy(out))
+
+def fit_gpu(image,size,fill=False):
+    cp=cuda();src=image if isinstance(image,CudaImage) else CudaImage(image)
+    w,h=src.width,src.height;ratio=size[0]/size[1]
+    if fill:
+        cw,ch=(h*ratio,h) if w/h>ratio else (w,w/ratio)
+        return src.resize_gpu(size,((w-cw)/2,(h-ch)/2,(w+cw)/2,(h+ch)/2))
+    scale=min(size[0]/w,size[1]/h);out_size=(max(1,round(w*scale)),max(1,round(h*scale)))
+    result=src.resize_gpu(out_size)
+    if out_size==size:return result
+    out=cp.zeros((size[1],size[0],3),dtype=cp.uint8);x=(size[0]-out_size[0])//2;y=(size[1]-out_size[1])//2
+    out[y:y+out_size[1],x:x+out_size[0]]=result
+    return out
 
 def effects(frame,settings,index):
     import math
@@ -144,7 +164,7 @@ def video_frame(image):
     flat=cp.concatenate((y.ravel(),uv(u).ravel(),uv(v).ravel())).reshape(h*3//2,w)
     return av.VideoFrame.from_ndarray(cp.asnumpy(flat),format='yuv420p')
 
-def image_from_video(frame):
+def image_from_video(frame,gpu=False):
     cp=cuda();h,w=frame.height,frame.width;name=frame.format.name
     if name in ('yuv420p','nv12'):
         raw=cp.asarray(frame.to_ndarray());flat=raw.ravel();y=flat[:h*w].reshape(h,w).astype(cp.float32)
@@ -155,5 +175,6 @@ def image_from_video(frame):
         u=u.astype(cp.float32).repeat(2,axis=0).repeat(2,axis=1)-128;v=v.astype(cp.float32).repeat(2,axis=0).repeat(2,axis=1)-128
         y=1.164384*(y-16)
         rgb=cp.stack((y+1.596027*v,y-.391762*u-.812968*v,y+2.017232*u),axis=2)
-        return Image.fromarray(cp.asnumpy(cp.clip(cp.rint(rgb),0,255).astype(cp.uint8)))
+        result=cp.clip(cp.rint(rgb),0,255).astype(cp.uint8)
+        return result if gpu else Image.fromarray(cp.asnumpy(result))
     raise RuntimeError(f'GPU-конвертация формата {name} пока не поддерживается; CPU-конвертация отключена.')

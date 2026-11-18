@@ -152,6 +152,12 @@ class Editing:
         if not isinstance(document, dict) or document.get('schema_version') != 1:
             raise DomainError('Неподдерживаемая схема монтажа.')
         doc = copy.deepcopy(document)
+        settings = doc.get('export_settings', {'width':1920,'height':1080,'fps':24})
+        if not isinstance(settings, dict):raise DomainError('Некорректные настройки экспорта.')
+        settings={**settings,'fps':settings.get('fps',24)}
+        if type(settings['fps']) is not int or settings['fps'] not in (24,30,60) or (settings.get('width'),settings.get('height')) not in ((1280,720),(1920,1080)):
+            raise DomainError('Выберите HD 720p или Full HD 1080p, 24, 30 или 60 кадров/с.')
+        doc['export_settings'] = {key:settings[key] for key in ('width','height','fps')}
         effects = doc.get('visual_effects', {})
         if (not isinstance(effects, dict) or set(effects) - {'old_film', 'light_leaks'}
                 or any(type(value) is not int or not 0 <= value <= 100 for value in effects.values())):
@@ -201,7 +207,7 @@ class Editing:
                 from .science_atlas import LAYOUTS
                 atlas=c['science_atlas']
                 if media_type!='image' or atlas.get('version')!='science-atlas/1' or atlas.get('layout') not in LAYOUTS:raise DomainError('Некорректный макет научпопа.')
-                for item in atlas.get('illustrations',[])+atlas.get('details',[]):
+                for item in atlas.get('illustrations',[])+atlas.get('details',[])+[layer for layer in atlas.get('scene_layers',[]) if layer.get('asset_id')]:
                     illustration=self.service.asset(item['asset_id'])
                     if illustration['project_id']!=project_id or not illustration['width'] or not illustration['height']:raise DomainError('Недопустимая иллюстрация научпопа.')
                     from PIL import Image
@@ -239,7 +245,7 @@ class Editing:
             number(c.get('source_scene_revision'), 0 if kind == 'footage' else 1)
             number(c.get('trim_in_ms'), 0, duration)
             number(c.get('trim_out_ms'), 0, duration)
-            if c['trim_out_ms'] - c['trim_in_ms'] < 1000 / 24:
+            if c['trim_out_ms'] - c['trim_in_ms'] < 1000 / doc['export_settings']['fps']:
                 raise DomainError('Клип должен содержать хотя бы один кадр.')
             number(c.get('volume', 1), 0, 1)
             number(c.get('playback_rate', 1), .05, 4)
@@ -292,10 +298,7 @@ class Editing:
             doc['voice_fit']['stale']=(audio_binding(self.service,project_id,doc)!=doc['voice_fit'].get('audio_binding')
                 or hashlib.sha256(self.service.project(project_id)['story'].encode()).hexdigest()!=doc['voice_fit'].get('story_sha256')
                 or source_signature(doc)!=doc['voice_fit'].get('source_hash'))
-        settings = doc.get('export_settings', {'width':1920,'height':1080,'fps':24})
-        if not isinstance(settings, dict) or settings.get('fps') != 24 or (settings.get('width'),settings.get('height')) not in ((1280,720),(1920,1080)):
-            raise DomainError('Выберите HD 720p или Full HD 1080p, 24 кадра/с.')
-        doc['export_settings'] = {key:settings[key] for key in ('width','height','fps')}
+
         return doc
 
     def save(self, project_id, data, *, guard=None):
@@ -386,6 +389,10 @@ class Editing:
                     anchors=lambda a:[n.get('source_char_start') for field in ('nodes','elements','annotations') for n in a.get(field,[])]
                     if anchors(old_atlas)==anchors(c['science_atlas']):
                         c['science_atlas']['cue_ms']=old_atlas.get('cue_ms',[]);c['science_atlas']['cue_timing']='audio_alignment'
+                        prior={(x.get('cue_quote'),x.get('source_char_start')):x for x in old_atlas.get('reveal_steps',[]) if x.get('timing_source')=='audio_alignment'}
+                        for step in c['science_atlas'].get('reveal_steps',[]):
+                            old=prior.get((step.get('cue_quote'),step.get('source_char_start')))
+                            if old:step.update(at_ms=old['at_ms'],timing_source='audio_alignment')
                 c.pop('camera_motion',None);c.pop('foreground_effect',None)
             elif scientific:c.pop('science_atlas',None)
             if c['trim_out_ms'] > duration or c['trim_in_ms'] >= duration-1000/24:

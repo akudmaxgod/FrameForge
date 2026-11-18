@@ -40,12 +40,18 @@ def state(plan, seconds):
             'opacity':max(0.,min(1.,t/max(1,200*min(1.,timing['duration']/4000))))}
 
 def command_state(plan, command, seconds):
+    if command.get('always_visible'):return {'start':0.,'progress':1.,'opacity':1.}
     timing = timeline(plan); duration = timing['duration']; unit = min(1., duration/4000)
     if duration < command.get('min_duration_ms',0):return {'start':duration,'progress':0.,'opacity':0.}
     group = command.get('reveal_group', 0)
     cue = command.get('cue_index'); cues = plan.get('cue_ms') or []
     anchored = cues[cue] if isinstance(cue,int) and cue < len(cues) else None
     start = float(anchored) if isinstance(anchored,(int,float)) and math.isfinite(anchored) else 0.
+    steps=plan.get('reveal_steps') or [];speech_anchor=False
+    if command.get('motion_group')=='support' and steps and int(group)<len(steps):
+        step=steps[int(group)]
+        start=max(start,float(step.get('at_ms',0)))
+        speech_anchor=step.get('timing_source')=='audio_alignment'
     support = command.get('motion_group') != 'illustration'
     if support:
         mode=plan.get('presentation_motion','slide_explain')
@@ -55,7 +61,7 @@ def command_state(plan, command, seconds):
         if mode=='detail_explain' and command.get('support_role')=='detail':start=max(120*unit,float(anchored) if isinstance(anchored,(int,float)) else 0.)
         if plan.get('support_reveal_ms'): start = max(start, float(plan['support_reveal_ms']))
     span = (180 if plan.get('presentation_motion')=='focus_explain' else 350 if command['type']=='text' else 420)*unit
-    start = min(max(0.,start), max(0.,duration-timing['settle']-span))
+    start = max(0.,start) if speech_anchor else min(max(0.,start), max(0.,duration-timing['settle']-span))
     progress = max(0., min(1., (seconds*1000-start)/max(1.,span)))
     return {'start':start, 'progress':progress, 'opacity':min(1.,progress*3) if command['type']=='text' else 1.}
 
@@ -75,7 +81,7 @@ def transform(command, source, target):
     return c
 
 def compile_slide(plan):
-    from .science_atlas_render import font, CONFIG
+    from .science_atlas_render import font, CONFIG,lines as header_lines
     from .science_visual_render import compile_visual
     from .science_explanatory import clean_notes,valid_scheme,draw_scheme
     from .science_typography import fit_commands
@@ -88,6 +94,12 @@ def compile_slide(plan):
     if len(items)!=1:raise DomainError('Плавное раскрытие требует одну основную иллюстрацию; сравнения сохраняют свой макет.')
     result=copy.deepcopy(plan);base=copy.deepcopy(plan);base['composition_mode']='slide_source';base['layout']='hero_caption'
     raw=compile_visual(base)['commands'];commands=[];target=[64,72,1080,936]
+    if plan.get('reveal_steps') and plan.get('headline'):
+        title=plan['headline'];size=48
+        while len(header_lines(title,1776,size,600))>2 and size>28:size-=1
+        for i,text in enumerate(header_lines(title,1776,size,600)):
+            commands.append({'type':'text','text':text,'x':72,'y':90+i*size*1.2,'size':size,'weight':600,'color':CONFIG['text'],'always_visible':True,'motion_group':'title'})
+        target=[64,180,1080,828]
     detail_layout=plan.get('presentation_motion')=='detail_explain' and bool(plan.get('details') or plan.get('detail_assets')) and not plan.get('explanatory_scheme')
     if detail_layout:target=[64,72,820,936]
     if plan.get('slide_direction','left')=='right':target[0]=1920-target[0]-target[2]
@@ -97,6 +109,7 @@ def compile_slide(plan):
     from .science_density import support_summary
     support=support_summary(plan);has_column=support['notes']>=2 or support['scheme'] or support['details'] or support['geometry']>=2
     if not has_column:target=[72,72,1776,936]
+    if plan.get('reveal_steps') and plan.get('headline'):target=[target[0],180,target[2],min(828,target[3])]
     # The contain rectangle is reduced to actual image pixels before fitting the group.
     primary=fit_commands(primary,font)
     iw,ih=items[0].get('width') or 1000,items[0].get('height') or 1000
@@ -114,7 +127,7 @@ def compile_slide(plan):
     scheme=plan.get('explanatory_scheme');scheme=scheme if valid_scheme(scheme,plan.get('support_quote','')) else None
     details=[d for d in plan.get('details',[]) if d.get('asset_id') and d['asset_id']!=items[0].get('asset_id')]
     # Prefer the source-bound diagram over a competing detail when space is limited.
-    graphic=bool(scheme or elements or details);y=90;note_bottom=455 if graphic else 930
+    graphic=bool(scheme or elements or details);header=bool(plan.get('reveal_steps') and plan.get('headline'));y=190 if header else 90;note_bottom=(555 if header else 455) if graphic else 930
     note_size=36 if len(notes)>2 else 42
     def wrap(value,size,width,weight=500):
         rows=[];line='';f=font(size,weight)

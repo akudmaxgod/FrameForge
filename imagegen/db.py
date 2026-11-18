@@ -498,6 +498,8 @@ class Database:
             legacy_pending = " OR status='pending_review'" if 'status' not in review_columns else ''
             connection.execute("UPDATE reviews SET status=CASE WHEN accepted=1 THEN 'approved' ELSE 'rejected' END WHERE status IS NULL OR status=''" + legacy_pending)
             connection.execute("UPDATE reviews SET updated_at=created_at WHERE updated_at IS NULL")
+            from .project_updates import install as install_project_updates
+            install_project_updates(connection)
             version = connection.execute('SELECT max(version) FROM schema_version').fetchone()[0]
             if version != 1:
                 raise RuntimeError(f'Unsupported database schema: {version}')

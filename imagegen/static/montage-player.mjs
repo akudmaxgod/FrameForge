@@ -44,6 +44,7 @@ export class MontagePlayer{
   }
   async prepareNow(time,force=false){
     const clips=this.timeline.clips.filter(c=>c.start_ms<=time&&time<c.end_ms);
+    const fps=this.doc.export_settings?.fps||24;for(const c of clips)c.output_fps=fps;
     drawEffects(this.effectsCanvas,clips.length?this.doc.visual_effects:undefined,Math.floor(time*24/1000));
     this.whiteCover.style.opacity=String(Math.max(0,...clips.map(c=>whiteFade(c,time))));
     const assignments=[];
@@ -57,7 +58,7 @@ export class MontagePlayer{
         const effect=c.foreground_effect;
         const seconds=sourceSeconds(c,time);
         if(effect?.motion){
-          const base=Math.max(1000/24,c.base_duration_ms-1000/24);
+          const base=Math.max(1000/fps,c.base_duration_ms-1000/fps);
           const progress=Math.max(0,Math.min(1,(seconds*1000-c.trim_in_ms)/(c.playback_rate??1)/base));
           v.dataset.foreground='1';
           v.dataset.holding=String(progress>=1);
@@ -73,7 +74,7 @@ export class MontagePlayer{
         const image=still.image,canvas=still.canvas,ctx=canvas.getContext('2d');ctx.fillStyle='black';ctx.fillRect(0,0,canvas.width,canvas.height);
         if(c.science_atlas){const atlas={...c.science_atlas,illustration_motion:{...(c.science_atlas.illustration_motion||{strength:.07}),duration_seconds:c.base_duration_ms/1000}};await drawScienceAtlas(ctx,still,atlas,(time-c.start_ms)/1000);}
         else if(c.foreground_effect)await drawForeground(ctx,still,c,image,seconds,v);
-        else if(c.camera_motion){const box=cameraBox(image.naturalWidth,image.naturalHeight,c.camera_motion,sourceSeconds(c,time)/Math.max(1/24,((c.camera_motion_total_ms||c.base_duration_ms)-(c.hold_last_ms||0))/1000-1/24));ctx.drawImage(image,box.x,box.y,box.w,box.h,0,0,canvas.width,canvas.height);}
+        else if(c.camera_motion){const box=cameraBox(image.naturalWidth,image.naturalHeight,c.camera_motion,sourceSeconds(c,time)/Math.max(1/fps,((c.camera_motion_total_ms||c.base_duration_ms)-(c.hold_last_ms||0))/1000-1/fps));ctx.drawImage(image,box.x,box.y,box.w,box.h,0,0,canvas.width,canvas.height);}
         else{const scale=(c.framing==='fill'?Math.max:Math.min)(canvas.width/image.naturalWidth,canvas.height/image.naturalHeight),w=image.naturalWidth*scale,h=image.naturalHeight*scale;ctx.drawImage(image,(canvas.width-w)/2,(canvas.height-h)/2,w,h);}
         canvas.style.visibility='visible';canvas.style.zIndex=String(i+1);canvas.style.opacity=String(opacity(c,time));return;
       }

@@ -306,11 +306,11 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
         edit(()=>{c.science_atlas=next;});
       };
       const mode=node('select');mode.setAttribute('aria-label','Раскрытие научпоп-кадра');
-      for(const [value,label] of [['','Прежняя постановка'],['slide_explain','Раскрытие со смещением'],['staged_explain','Пояснения без смещения'],['focus_explain','Спокойный крупный план'],['detail_explain','Общий вид и деталь'],['single_subject','Один рисунок · по смыслу сцены']]){const o=node('option',label);o.value=value;mode.append(o);}mode.value=atlas.frame_density==='single_subject'?'single_subject':['slide_explain','staged_explain','focus_explain','detail_explain'].includes(atlas.presentation_motion)?atlas.presentation_motion:'';
+      for(const [value,label] of [['','Прежняя постановка'],['slide_explain','Раскрытие со смещением'],['staged_explain','Пояснения без смещения'],['focus_explain','Спокойный крупный план'],['detail_explain','Общий вид и деталь'],['panorama_explain','Общий вид и панорама деталей'],['single_subject','Один рисунок · по смыслу сцены']]){const o=node('option',label);o.value=value;mode.append(o);}mode.value=atlas.frame_density==='single_subject'?'single_subject':['slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain'].includes(atlas.presentation_motion)?atlas.presentation_motion:'';
       const solo=node('label','Почему сцене нужен один рисунок'),reason=node('textarea');reason.rows=3;reason.setAttribute('aria-label','Обоснование одиночного рисунка');reason.value=atlas.single_subject_reason||'';solo.append(reason);solo.hidden=mode.value!=='single_subject';
       reason.onchange=()=>prepareAtlas({presentation_motion:'none',frame_density:'single_subject',single_subject_reason:reason.value}).catch(e=>notice(e.message,true));
       mode.onchange=()=>{solo.hidden=mode.value!=='single_subject';if(mode.value==='single_subject'){reason.focus();return;}prepareAtlas({presentation_motion:mode.value,frame_density:mode.value?'filled':'legacy'}).catch(e=>notice(e.message,true));};inspector.append(node('label','Раскрытие научпоп-кадра'),mode,solo);
-      if(['slide_explain','staged_explain','focus_explain','detail_explain'].includes(atlas.presentation_motion)){
+      if(['slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain'].includes(atlas.presentation_motion)){
         const direction=node('select');direction.setAttribute('aria-label','Направление иллюстрации');for(const [value,label] of [['left','Иллюстрация слева · пояснения справа'],['right','Иллюстрация справа · пояснения слева']]){const o=node('option',label);o.value=value;direction.append(o);}direction.value=atlas.slide_direction||'left';direction.onchange=()=>prepareAtlas({slide_direction:direction.value}).catch(e=>notice(e.message,true));inspector.append(direction);
       }
       {
@@ -442,12 +442,16 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
     }
     const quality=node('label','Качество '),select=node('select');
     for(const [height,title] of [[1080,'Full HD · 1920 × 1080'],[720,'HD · 1280 × 720']]){const option=node('option',title);option.value=String(height);option.selected=height===(s.doc.export_settings?.height||1080);select.append(option);}
-    select.onchange=()=>{edit(doc=>doc.export_settings={width:Number(select.value)===1080?1920:1280,height:Number(select.value),fps:24});showJob();};quality.append(select);exports.append(quality);
+    select.onchange=()=>{edit(doc=>doc.export_settings={width:Number(select.value)===1080?1920:1280,height:Number(select.value),fps:doc.export_settings?.fps||24});showJob();};quality.append(select);
+    const rate=node('select');rate.setAttribute('aria-label','Частота кадров экспорта');
+    for(const fps of [24,30,60]){const option=node('option',`${fps} кадров/с`);option.value=String(fps);option.selected=fps===(s.doc.export_settings?.fps||24);rate.append(option);}
+    rate.onchange=()=>{edit(doc=>doc.export_settings={...doc.export_settings,fps:Number(rate.value)});showJob();};quality.append(rate);exports.append(quality);
     more.replaceChildren(...[...more.children].filter(n=>n.dataset.exportExtra!=='true'));const zip=button('Скачать кадры (.zip)',downloadZip);zip.dataset.exportExtra='true';more.append(zip);exports.append(button('Экспортировать MP4',async()=>{await flush(s);job=await api(`/projects/${id}/edit/export`,{expected_revision:s.revision});s.lastExport=job.id;localStorage.setItem(key(id)+':job',job.id);showJob();poll();}));
     if(s.doc.voice_fit?.cues?.length)exports.append(button('Скачать субтитры (.srt)',async()=>{await flush(s);const result=await api(`/projects/${id}/edit/subtitles`);const url=URL.createObjectURL(new Blob([result.srt],{type:'text/plain;charset=utf-8'}));const a=node('a');a.href=url;a.download='frameforge.srt';a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);}));
     if(!job)return;
     if(['queued','running'].includes(job.status)){const progress=node('progress');progress.max=100;progress.value=job.progress;exports.append(node('p',`${job.stage} · ${Math.round(job.progress)}%`),progress);}
     if(job.error){exports.append(node('p',job.error,'montage-warning'));localStorage.removeItem(scienceBuildKey);}
+    if(job.resumable)exports.append(button('Продолжить сборку',async()=>{await flush(s);job=await api(`/projects/${id}/edit/exports/${job.id}/resume`,{});showJob();poll();}));
     if(job.url){const link=node('a',job.edit_revision===s.revision?'Скачать готовое видео':'Скачать предыдущий экспорт');link.href=job.url;link.download='frameforge.mp4';exports.append(link);}
     if(['queued','running'].includes(job.status))exports.append(button('Отменить экспорт',async()=>{job=await api(`/projects/${id}/edit/exports/${job.id}/cancel`,{});showJob();}));
   }
@@ -464,7 +468,7 @@ export async function mountMontage(host,{project,api,downloadZip,notice}){
     }catch(error){notice(error.message,true);audioPanel.open=!(s.doc.audio_tracks||[]).some(a=>a.role==='voice'&&a.enabled!==false);throw error;}
     finally{scienceBuildBusy=false;scienceBuildStage='';showJob();}
   }
-  async function poll(){clearTimeout(timer);if(disposed||!job)return;try{const announce=job.announce,previous=job.status;job=await api(`/projects/${id}/edit/exports/${job.id}`);if(disposed)return;showJob();if(job.status==='completed'&&(announce||['queued','running'].includes(previous)))notice(`Видео готово · ${job.width} × ${job.height}. Можно скачать MP4.`);if(['queued','running'].includes(job.status))timer=setTimeout(poll,1000);}catch(e){notice(e.message,true);}}
+  async function poll(){clearTimeout(timer);if(disposed||!job)return;try{const announce=job.announce,previous=job.status;job=await api(`/projects/${id}/edit/exports/${job.id}`);if(disposed)return;showJob();if(job.status==='completed'&&(announce||['queued','running'].includes(previous)))notice(`Видео готово · ${job.width} × ${job.height} · ${job.fps||24} кадров/с. Можно скачать MP4.`);if(['queued','running'].includes(job.status))timer=setTimeout(poll,1000);}catch(e){notice(e.message,true);}}
   const keyboard=e=>{
     if(disposed)return;
     const isTyping=Boolean(e.target?.closest?.('input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable="true"]'));

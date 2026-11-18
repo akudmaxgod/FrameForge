@@ -55,8 +55,16 @@ class ExplanatoryScheme(StrictModel):
     labels: list[str] = Field(min_length=2,max_length=3)
     cue_quote: str = Field(min_length=1,max_length=1200)
 
+class RevealStep(StrictModel):
+    kind: Literal['part','focus','caption'] = 'caption'
+    cue_quote: str = Field(min_length=3,max_length=180)
+    title: str = Field(min_length=1,max_length=90)
+    explanation: str = Field(default='',max_length=180)
+    region_key: str = Field(default='',max_length=90)
+
 class Shot(StrictModel):
     n: int
+    reveal_steps: list[RevealStep] = Field(default_factory=list,max_length=4)
     layout: Literal['hero_caption','image_left','image_right','comparison','process','instruction','factors','text_card','local_board']
     function: Literal['structure','mechanism','factors','comparison','instruction','analogy','observation','summary','transition']
     representation: Literal['literal','schematic','analogy']
@@ -69,7 +77,7 @@ class Shot(StrictModel):
     support_cue_quote: str = Field(default='',max_length=200)
     text_animation: Literal['none','typewriter'] = 'typewriter'
     labels: list[str] = Field(default_factory=list, max_length=4)
-    presentation_motion: Literal['none','slide_explain','staged_explain','focus_explain','detail_explain'] = 'none'
+    presentation_motion: Literal['none','slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain'] = 'none'
     slide_direction: Literal['left','right'] = 'left'
     frame_density: Literal['legacy','filled','single_subject'] = Field(default='legacy',description='Новые сцены: filled по умолчанию. single_subject только при необходимости по смыслу. legacy — совместимость старых планов.')
     single_subject_reason: str = Field(default='',max_length=350)
@@ -227,6 +235,12 @@ def errors(plan, frames, known, registry,*,visual_first=True):
         if s.n not in lookup:continue
         narration=lookup[s.n]['narration']
         if s.support_quote not in narration:bad(s.n,'support_quote не из текущей narration.')
+        previous=-1
+        for step in s.reveal_steps:
+            pos=narration.find(step.cue_quote)
+            if pos<=previous or narration.count(step.cue_quote)!=1:bad(s.n,'reveal_steps требуют однозначные дословные цитаты текущей narration по порядку.')
+            previous=pos
+        if len(s.reveal_steps)==1:bad(s.n,'Для раскрытия нужны 2–4 шага или пустой список.')
         if s.support_asset_key and (s.support_asset_key not in merged or s.support_asset_key in s.asset_keys or len(s.asset_keys)!=1 or s.layout=='comparison'):bad(s.n,'Дополнительная поясняющая иллюстрация должна иметь отдельный известный ключ и один общий план.')
         if not set(s.asset_keys)<=merged.keys():bad(s.n,'Неизвестный asset key.')
         if not set(s.cast)<=registry.keys():bad(s.n,'Неизвестный cast ID.')
@@ -244,7 +258,7 @@ def errors(plan, frames, known, registry,*,visual_first=True):
         if visual_first and any(len(label.split())>5 for label in s.labels):bad(s.n,'Подписи состояний сравнения — до 5 слов, без пересказа озвучки.')
         if s.frame_density=='single_subject' and len(s.single_subject_reason.strip())<20:bad(s.n,'Один рисунок требует конкретного обоснования по смыслу сцены, а не свободного места.')
         if s.frame_density=='filled' and len(s.asset_keys)==1 and len(s.labels)<2 and not s.explanatory_scheme and not s.support_asset_key and len([e for e in s.elements if e.kind!='text'])<2:bad(s.n,'Наполненный кадр: запланируй разные пояснения, содержательную схему или независимую деталь. Один рисунок не является завершённой постановкой.')
-        if s.presentation_motion in ('slide_explain','staged_explain','focus_explain','detail_explain') and len(s.asset_keys)!=1:bad(s.n,'Раскрытие требует одну основную иллюстрацию.')
+        if s.presentation_motion in ('slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain') and len(s.asset_keys)!=1:bad(s.n,'Раскрытие требует одну основную иллюстрацию.')
         if s.layout=='comparison':
             if len(s.asset_keys)!=2 or len(set(s.asset_keys))!=2 or len(s.labels)!=2:bad(s.n,'Сравнение требует две разные иллюстрации и две подписи.')
             elif set(s.asset_keys)<=merged.keys():
@@ -450,6 +464,7 @@ def project_preflight(project):
             raw['nodes']=[{k:v[k] for k in Node.model_fields if k in v} for v in raw.get('nodes',[])]
             raw['elements']=[{k:v[k] for k in Element.model_fields if k in v} for v in raw.get('elements',[])]
             raw['annotations']=[{k:v[k] for k in Annotation.model_fields if k in v} for v in raw.get('annotations',[])]
+            raw['reveal_steps']=[{k:v[k] for k in RevealStep.model_fields if k in v} for v in raw.get('reveal_steps',[])]
             shot=Shot.model_validate(raw)
             issues,_=errors(Plan(assets=[],shots=[shot]),[{'n':n,'narration':data['source_quote']}],catalog,registry,visual_first=diagnostic.get('version')==PLANNER_VERSION)
             unresolved=copy.deepcopy(visual)
@@ -464,3 +479,5 @@ def project_preflight(project):
     if not report['ok']:problems.append({'code':'source_coverage','message':'Научный план не покрывает исходный текст.'})
     return {'ok':not problems,'valid':not problems,'errors':problems,'warnings':[],
         'stats':{'total_scenes':len(project.get('scenes',[])),'validation':'scientific_visual_contract/2'},'source_coverage':report}
+
+PROMPT += '\nДля подходящей сцены с одной основной иллюстрацией запланируй 2–4 reveal_steps: kind=part/focus/caption, cue_quote — короткая однозначная дословная цитата ТЕКУЩЕЙ narration, title — краткая подпись, explanation — краткая роль детали, region_key — название видимой детали. Шаги идут по порядку речи. Не выдавай координаты за проверенные: пространственная привязка выполняется отдельно по готовому изображению. Для наблюдения без различимых частей используй caption. Основной headline остаётся темой сцены с первого кадра.\n'

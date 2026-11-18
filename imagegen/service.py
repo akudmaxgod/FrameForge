@@ -1133,7 +1133,10 @@ class Service:
         return self.project(project_id)
 
     def detail(self, project_id):
+        from .project_updates import versions
+        cursor=versions(self,project_id)
         result = self.project(project_id)
+        result['updates']=cursor
         result['cast_bible'] = json.loads(result.get('cast_bible') or '{}')
         result['analysis_metadata'] = json.loads(result.get('analysis_metadata') or '{}')
         from .voice_workflow import public as voice_public
@@ -1162,10 +1165,18 @@ class Service:
         for prop in result['props']:
             prop['references'] = json.loads(prop.pop('references_json'))
             prop['casting'] = self.reference_cast('prop', prop)
-        result['scenes'] = self.db.all('SELECT * FROM scenes WHERE project_id=? ORDER BY position', (project_id,))
+        result['scenes'] = self.db.all('''SELECT s.*,r.data AS joined_scene_data,
+            g.asset_id AS joined_image_asset,g.scene_revision AS joined_image_revision,
+            previous.data AS joined_previous_data,video.path AS joined_video_path,
+            (SELECT snapshot FROM generations vg WHERE vg.asset_id=s.video_asset_id AND vg.purpose='scene_video' LIMIT 1) AS joined_video_snapshot
+            FROM scenes s LEFT JOIN scene_revisions r ON r.scene_id=s.id AND r.revision=s.current_revision
+            LEFT JOIN generations g ON g.id=s.active_generation_id
+            LEFT JOIN scene_revisions previous ON previous.scene_id=s.id AND previous.revision=g.scene_revision
+            LEFT JOIN assets video ON video.id=s.video_asset_id
+            WHERE s.project_id=? ORDER BY s.position''',(project_id,))
         for scene in result['scenes']:
-            row = self.db.one('SELECT data FROM scene_revisions WHERE scene_id=? AND revision=?',
-                              (scene['id'], scene['current_revision']))
+            joined={k:scene.pop(k) for k in list(scene) if k.startswith('joined_')}
+            row={'data':joined['joined_scene_data']}
             # Keep the stored revision separate from the display copy.  The
             # display copy is enriched with the current Cast Bible names
             # below; using it for stale detection made a scene look stale
@@ -1185,13 +1196,13 @@ class Service:
             scene['video_stale'] = False
             active_image_asset_id = None
             if scene['active_generation_id']:
-                generation = self.db.one('SELECT asset_id, scene_revision FROM generations WHERE id=?', (scene['active_generation_id'],))
+                generation = {'asset_id':joined['joined_image_asset'],'scene_revision':joined['joined_image_revision']} if joined['joined_image_revision'] is not None else None
                 if generation:
                     active_image_asset_id = generation.get('asset_id')
                     gen_rev = generation['scene_revision']
                     cur_rev = scene['current_revision']
                     if gen_rev != cur_rev:
-                        gen_data_row = self.db.one('SELECT data FROM scene_revisions WHERE scene_id=? AND revision=?', (scene['id'], gen_rev))
+                        gen_data_row = {'data':joined['joined_previous_data']} if joined['joined_previous_data'] is not None else None
                         if gen_data_row:
                             g_data = json.loads(gen_data_row['data'])
                             g_content = {k: v for k, v in g_data.items() if k != 'animation'}
@@ -1200,7 +1211,7 @@ class Service:
                         else:
                             scene['stale'] = True
             if scene.get('video_asset_id'):
-                video_asset = self.db.one('SELECT path FROM assets WHERE id=?', (scene['video_asset_id'],))
+                video_asset = {'path':joined['joined_video_path']} if joined['joined_video_path'] else None
                 if video_asset:
                     video_path = self.root / video_asset['path']
                     try:
@@ -1211,7 +1222,7 @@ class Service:
             if scene.get('video_asset_id') and active_image_asset_id:
                 vid_source_asset = scene['data'].get('animation', {}).get('source_image_asset_id')
                 if not vid_source_asset:
-                    v_gen = self.db.one("SELECT snapshot FROM generations WHERE asset_id=? AND purpose='scene_video'", (scene['video_asset_id'],))
+                    v_gen = {'snapshot':joined['joined_video_snapshot']} if joined['joined_video_snapshot'] else None
                     if v_gen:
                         try:
                             s_data = json.loads(v_gen['snapshot']) if isinstance(v_gen['snapshot'], str) else v_gen['snapshot']
@@ -1223,6 +1234,7 @@ class Service:
                     if not scene.get('stale_reason'):
                         scene['stale_reason'] = 'Видео создано для другого варианта кадра'
         result['generations'] = self.db.all('SELECT * FROM generations WHERE project_id=? ORDER BY created_at', (project_id,))
+        reviews={r['generation_id']:r for r in self.db.all('SELECT r.* FROM reviews r JOIN generations g ON g.id=r.generation_id WHERE g.project_id=?',(project_id,))}
         scene_by_id = {scene['id']: scene for scene in result['scenes']}
         for generation in result['generations']:
             generation['snapshot'] = json.loads(generation['snapshot'])
@@ -1234,9 +1246,7 @@ class Service:
                 )
                 if (current_scene and current_scene['data'].get('science_atlas') and current_scene.get('active_generation_id')==generation['id'] and not generation['current_scene_compatible']):
                     current_scene['stale']=True;current_scene['stale_reason']='Изменились иллюстрации или научный макет; требуется пересборка.'
-                generation['review'] = self._decode_review(
-                    self.db.one('SELECT * FROM reviews WHERE generation_id=?', (generation['id'],))
-                )
+                generation['review'] = self._decode_review(reviews.get(generation['id']))
         result['batches'] = self.db.all('SELECT * FROM batches WHERE project_id=? ORDER BY created_at DESC', (project_id,))
         result['story_bible'] = build_global_story_bible(result['story'], result['characters'], result['scenes'])
         

@@ -16,7 +16,7 @@ export async function drawForeground(ctx, still, clip, image, seconds, video) {
   const w = Math.round(image.naturalWidth * scale), h = Math.round(image.naturalHeight * scale);
   const x = Math.floor((width - w) / 2), y = Math.floor((height - h) / 2);
   const elapsed = (seconds * 1000 - clip.trim_in_ms) / (clip.playback_rate ?? 1);
-  const t = clamp(elapsed / Math.max(1000 / 24, clip.base_duration_ms - 1000 / 24));
+  const t = clamp(elapsed / Math.max(1000 / (clip.output_fps||24), clip.base_duration_ms - 1000 / (clip.output_fps||24)));
   if (effect.mode === 'local_25d') {
     ctx.drawImage(video, x, y, w, h);
     return;
@@ -322,7 +322,7 @@ export function foregroundPairDialog(clip, context, apply) {
     if(!dx.reportValidity() || !dy.reportValidity()) return;
     stop();
     const start=performance.now();
-    const span=Math.max(1000/24,(clip.trim_out_ms-clip.trim_in_ms)/(clip.playback_rate??1)-1000/24);
+    const span=Math.max(1000/(clip.output_fps||24),(clip.trim_out_ms-clip.trim_in_ms)/(clip.playback_rate??1)-1000/(clip.output_fps||24));
     const tick=now=>{
       const t=clamp((now-start)/span);
       paint(t);

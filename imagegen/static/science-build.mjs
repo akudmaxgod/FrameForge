@@ -4,6 +4,12 @@ export async function buildScienceMovie({id,api,getState,flush,synchronize,accep
  await flush();
  if(checkpoint.fit_id){fit=await api(`${base}/voice-fit/${checkpoint.fit_id}`);if(fit.status==='applied'&&fit.applied_revision!==getState().revision){fit=null;checkpoint={};}}
  if(!fit){
+  progress('Проверяю детали иллюстраций');let spatial=await api(`/projects/${id}/science-atlas/grounding`,{});
+  while(spatial.pending||spatial.deferred){
+   if(cancelled())throw Error('Сборка остановлена до экспорта.');
+   progress(`Проверяю детали иллюстраций · осталось ${spatial.pending+spatial.deferred}`);await wait(1000);
+   spatial=spatial.pending?await api(`/projects/${id}/science-atlas/grounding`):await api(`/projects/${id}/science-atlas/grounding`,{});
+  }
   progress('Обновляю готовые сцены');await synchronize();await flush();
   const state=getState();if(!(state.doc.audio_tracks||[]).some(a=>a.role==='voice'&&a.enabled!==false))throw Error('Добавьте озвучку на звуковую дорожку, затем повторите сборку.');
   if(!state.doc.clips.some(c=>!c.excluded))throw Error('Готовые сцены пока не добавлены в монтаж.');

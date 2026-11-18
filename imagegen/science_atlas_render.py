@@ -43,6 +43,10 @@ def hydrate(service,scene):
     for item in plan['illustrations']+plan['details']:
         if item.get('asset_id'):
             asset=service.asset(item['asset_id']);item['width']=asset['width'];item['height']=asset['height']
+    from .science_grounding import cached
+    grounding=cached(service,plan)
+    for name,value in grounding.items():
+        if not plan.get(name):plan[name]=value
     if plan.get('presentation')=='visual_first':plan.setdefault('composition_mode','explanatory')
     return compile_commands(plan)
 
@@ -74,7 +78,19 @@ def readable_color(color,background=None):
 def compile_commands(plan):
     from .science_density import normalize_density
     plan=normalize_density(plan)
+    if 'script_scene' in plan:
+        plan=copy.deepcopy(plan);plan.pop('script_scene',None)
+    if plan.get('reveal_steps') and plan.get('reveal_source'):
+        plan=copy.deepcopy(plan);duration=(plan.get('illustration_motion') or {}).get('duration_seconds',6)*1000
+        for step in plan['reveal_steps']:
+            if step.get('timing_source')!='audio_alignment':step['at_ms']=max(0,plan['reveal_source'].find(step.get('cue_quote','')))/max(1,len(plan['reveal_source']))*duration
     if plan.get('presentation')=='visual_first':
+        from .science_script import compile_script
+        script=compile_script(plan)
+        if script:
+            plan=copy.deepcopy(plan);plan['script_scene']=script;plan['slide_contract_version']=3
+            plan['commands']=[{'type':'image','asset_id':script['asset_id'],'rect':script['overview']}]
+            return plan
         from .science_visual_render import compile_visual
         from .science_slide_reveal import enabled
         if enabled(plan):
@@ -170,10 +186,9 @@ class ScienceReader:
         from .science_typography import fit_commands
         from .science_density import normalize_density
         plan=normalize_density(plan)
-        self.plan=copy.deepcopy(plan);self.slide=plan.get('presentation_motion') in ('slide_explain','staged_explain','focus_explain','detail_explain');self.compositors={}
+        self.plan=copy.deepcopy(plan);self.slide=plan.get('presentation_motion') in ('slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain');self.compositors={}
         if self.slide:
-            from .science_slide_reveal import compile_slide
-            self.plan=compile_slide(self.plan)
+            self.plan=compile_commands(self.plan)
         self.commands=self.plan.get('commands',[]) if self.slide else fit_commands(playback_commands(plan),font)
         self.resolve=resolve;self.images={};self.frames={}
         duration_ms=(plan.get('illustration_motion') or {}).get('duration_seconds',6)*1000
@@ -184,7 +199,10 @@ class ScienceReader:
         if size not in self.compositors:
             for old in self.compositors.values():old.close()
             self.compositors.clear()
-            self.compositors[size]=SlideCompositor(self.plan,self.commands,self.resolve,size)
+            if self.plan.get('script_scene'):
+                from .science_script_gpu import ScriptCompositor
+                self.compositors[size]=ScriptCompositor(self.plan,self.resolve,size)
+            else:self.compositors[size]=SlideCompositor(self.plan,self.commands,self.resolve,size)
         return self.compositors[size]
     def gpu_image(self,seconds,size):
         if not self.slide:raise ValueError('Retained GPU images require slide_explain')
@@ -207,7 +225,7 @@ class ScienceReader:
         from .science_motion import image_scale,typed_text,pulse_position,draw_progress
         animated=bool(self.plan.get('illustrations') and self.plan.get('illustration_motion',{}).get('strength')) or any(c.get('typing_cps') or c.get('draw_ms') or c['type']=='pulse' for c in self.commands)
         timed=tuple(seconds*1000>=c.get('at_ms',0) for c in self.commands if c.get('at_ms'))
-        key=(size,visible,focus['phase'] if focus else None,timed,round(seconds*24) if animated and not preview else None,preview)
+        key=(size,visible,focus['phase'] if focus else None,timed,round(seconds*1000) if animated and not preview else None,preview)
         if key in self.frames:return self.frames[key]
         from .gpu_pixels import CudaImage,paste
         image=Image.new('RGB',size,CONFIG['background']);scale=size[0]/1920
@@ -260,7 +278,7 @@ def render_video(plan,resolve,output,duration=6,fps=24,target_size=(1920,1080)):
     from .gpu_pixels import video_frame
     output=Path(output);output.parent.mkdir(parents=True,exist_ok=True)
     plan=copy.deepcopy(plan)
-    if plan.get('presentation_motion') in ('slide_explain','staged_explain','focus_explain','detail_explain') or plan.get('frame_density')=='filled':plan.setdefault('illustration_motion',{})['duration_seconds']=duration
+    if plan.get('presentation_motion') in ('slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain') or plan.get('frame_density')=='filled':plan.setdefault('illustration_motion',{})['duration_seconds']=duration
     elif plan.get('illustration_motion'):plan['illustration_motion']['duration_seconds']=duration
     reader=ScienceReader(plan,resolve)
     try:
@@ -273,7 +291,7 @@ def render_video(plan,resolve,output,duration=6,fps=24,target_size=(1920,1080)):
             for packet in stream.encode():container.mux(packet)
         stats=dict(reader.compositor(target_size).stats) if reader.slide else {}
         if reader.slide:stats['yuv_download_bytes']=total*target_size[0]*target_size[1]*3//2
-        return {'gpu_stats':stats,'host_transfer':'one yuv420p download per frame to PyAV/NVENC' if reader.slide else 'legacy PIL bridge','path':str(output),'duration':duration,'fps':fps,'frames':total,'renderer_version':(6 if reader.plan.get('presentation_motion')=='slide_explain' else 7) if reader.slide else 4,'encoder':'h264_nvenc','compute_device':'cuda','safe_crop':{},'reason':'Научпоп: макет и подписи, без деформации иллюстрации'}
+        return {'gpu_stats':stats,'host_transfer':'one yuv420p download per frame to PyAV/NVENC' if reader.slide else 'legacy PIL bridge','path':str(output),'duration':duration,'fps':fps,'frames':total,'renderer_version':8 if reader.plan.get('reveal_steps') else (6 if reader.plan.get('presentation_motion')=='slide_explain' else 7) if reader.slide else 4,'encoder':'h264_nvenc','compute_device':'cuda','safe_crop':{},'reason':'Научпоп: макет и подписи, без деформации иллюстрации'}
     finally:reader.close()
 
 def assemble_project(service,pid,scene_ids=None):
@@ -288,6 +306,9 @@ def assemble_project(service,pid,scene_ids=None):
             if not scene['data'].get('science_atlas'):continue
             plan=hydrate(service,scene)
             if any(not item['asset_id'] for item in plan['illustrations']):result['waiting']+=1;continue
+            if plan.get('presentation_motion')=='panorama_explain' and plan.get('reveal_steps') and not plan.get('script_scene'):
+                from .science_grounding import schedule
+                schedule(service,pid,scene['id'],plan)
             key=hashlib.sha256(dump(plan).encode()).hexdigest()
             active=service.db.one('SELECT snapshot FROM generations WHERE id=?',(scene.get('active_generation_id'),))
             if active and snapshot_matches_plan(json.loads(active['snapshot']),plan):continue

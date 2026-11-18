@@ -4,7 +4,7 @@ import {spawn,execFileSync} from 'node:child_process';
 import {chromium} from 'playwright-core';
 import {normalize,opacity} from '../imagegen/static/montage-timeline.mjs';
 const root=new URL('../',import.meta.url).pathname.replace(/^\/(.:)/,'$1');
-const python=root+'/.venv/Scripts/python.exe';
+const python=process.env.FRAMEFORGE_TEST_PYTHON||root+'/.venv/Scripts/python.exe';
 test('Python and browser use identical timeline and transition opacity',()=>{
   const document={clips:[{edit_clip_id:'a',trim_in_ms:250,trim_out_ms:1250},{edit_clip_id:'b',trim_in_ms:0,trim_out_ms:100},{edit_clip_id:'c',trim_in_ms:0,trim_out_ms:900}],transitions:[{left:'a',right:'b',kind:'dissolve',duration_ms:500},{left:'b',right:'c',kind:'black',duration_ms:500}],audio_tracks:[]};
   const result=JSON.parse(execFileSync(python,['-c','import sys,json; from imagegen.editing import normalize; print(json.dumps(normalize(json.load(sys.stdin))))'],{cwd:root,input:JSON.stringify(document)}));
@@ -22,8 +22,13 @@ test('montage edits, preview, audio, save, export and tab cleanup', {timeout:900
   const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});t.after(()=>browser.close());
   const page=await browser.newPage({viewport:{width:1500,height:1100}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(f.url);await page.locator('#project-select').selectOption(f.pid);await page.locator('[data-view=export]').click();
-  await page.getByRole('button',{name:'Добавить готовые сцены',exact:true}).click();await page.getByText('Список сцен',{exact:true}).click();await page.locator('.montage-clip').first().waitFor();
+  await page.getByRole('button',{name:'Добавить готовые сцены',exact:true}).click();await page.locator('.montage-clip').first().waitFor();
   assert.equal(await page.locator('.montage-stage video').count(),2);assert.equal(await page.locator('.montage-clip').count(),3);
+  await page.locator('.montage-export-menu > summary').click();
+  const rate=page.getByLabel('Частота кадров экспорта',{exact:true});
+  for(const fps of ['60','30','24']){await rate.selectOption(fps);assert.equal(await rate.inputValue(),fps);}
+  await rate.selectOption('60');await page.locator('.montage-exports select').first().selectOption('720');assert.equal(await rate.inputValue(),'60');await rate.selectOption('24');
+  await page.locator('.montage-export-menu > summary').click();
   await page.locator('.montage-clip').first().click();await page.getByLabel('Начало в исходнике, с',{exact:true}).fill('0.25');await page.getByLabel('Начало в исходнике, с',{exact:true}).dispatchEvent('change');
   await page.getByRole('button',{name:'↶ Отменить',exact:true}).click();assert.equal(await page.getByLabel('Начало в исходнике, с',{exact:true}).inputValue(),'0');
   await page.getByRole('button',{name:'↷ Повторить',exact:true}).click();
@@ -34,26 +39,35 @@ test('montage edits, preview, audio, save, export and tab cleanup', {timeout:900
   await page.getByRole('button',{name:'▶ Воспроизвести',exact:true}).click();await page.waitForFunction(()=>Number(document.querySelector('input[aria-label="Время монтажа"]').value)>150);
   await page.getByRole('button',{name:'Ⅱ Пауза',exact:true}).click();
   assert.equal(await page.locator('.montage-stage video').evaluateAll(v=>v.every(m=>m.paused)),true);
-  await page.getByLabel('Загрузить озвучку').setInputFiles(f.voice);await page.locator('.montage-track').first().getByText('Длительность файла:',{exact:false}).waitFor();
+  await page.getByRole('tab',{name:'Звук',exact:true}).click();await page.getByLabel('Загрузить озвучку').setInputFiles(f.voice);await page.locator('.montage-track').first().getByText('Длительность файла:',{exact:false}).waitFor();
   await page.getByLabel('Громкость',{exact:true}).first().fill('0.5');await page.getByLabel('Громкость',{exact:true}).first().dispatchEvent('change');
   await page.getByLabel('Время монтажа',{exact:true}).evaluate(input=>{input.value=500;input.dispatchEvent(new Event('input'));});
   await page.waitForFunction(()=>Math.abs(document.querySelector('.montage-stage audio').currentTime-.5)<.05);
   assert.equal(await page.locator('.montage-stage audio').evaluateAll(a=>a.every(m=>m.paused)),true);
-  await page.getByRole('button',{name:'Экспортировать MP4',exact:true}).click();await page.getByRole('link',{name:/Скачать MP4 · версия/}).waitFor({timeout:45000});
-  await page.reload();await page.locator('#project-select').selectOption(f.pid);await page.locator('[data-view=export]').click();await page.getByText('Список сцен',{exact:true}).click();await page.locator('.montage-clip').first().click();
+  await page.locator('.montage-export-menu > summary').click();await page.getByRole('button',{name:'Экспортировать MP4',exact:true}).click();await page.getByRole('link',{name:'Скачать готовое видео',exact:true}).waitFor({timeout:45000});
+  await page.reload();await page.locator('#project-select').selectOption(f.pid);await page.locator('[data-view=export]').click();await page.locator('.montage-clip').first().click();
   assert.equal(await page.getByLabel('Начало в исходнике, с',{exact:true}).inputValue(),'0.25');
   await page.evaluate(async pid=>{const session=await (await fetch('/api/session')).json();const edit=await (await fetch(`/api/projects/${pid}/edit`)).json();edit.document.clips[0].volume=.8;await fetch(`/api/projects/${pid}/edit`,{method:'POST',headers:{'Content-Type':'application/json','X-Session-Token':session.token},body:JSON.stringify({expected_revision:edit.revision,document:edit.document})});},f.pid);
   await page.getByLabel('Начало в исходнике, с',{exact:true}).fill('0.3');await page.getByLabel('Начало в исходнике, с',{exact:true}).dispatchEvent('change');
   await page.waitForFunction(()=>document.querySelector('.montage-save').textContent.includes('другой вкладке'));
   assert.equal(await page.evaluate(pid=>JSON.parse(localStorage.getItem('frameforge-edit:'+pid)).document.clips[0].trim_in_ms,f.pid),300);
-  await page.getByRole('button',{name:'Перечитать с сервера',exact:true}).click();
+  await page.locator('.montage-more > summary').click();await page.getByRole('button',{name:'Перечитать с сервера',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('.montage-save').textContent.startsWith('Сохранено'));
   assert.equal(await page.getByLabel('Начало в исходнике, с',{exact:true}).inputValue(),'0.25');
   assert.equal(await page.evaluate(pid=>JSON.parse(localStorage.getItem('frameforge-edit:'+pid+':recovery')).clips[0].trim_in_ms,f.pid),300);
   await page.evaluate(()=>window.testMontageMedia=[...document.querySelectorAll('.montage-stage video,.montage-stage audio')]);
-  await page.locator('[data-view=queue]').click();assert.equal(await page.locator('.montage-stage video').count(),0);
+  await page.locator('[data-view=studio]').click();assert.equal(await page.locator('.montage-stage video').count(),0);
   assert.equal(await page.evaluate(()=>window.testMontageMedia.every(m=>m.paused&&!m.getAttribute('src'))),true);
   assert.deepEqual(errors,[]);
+});
+
+test('idle project polls cursors without repeatedly downloading its storyboard',{timeout:30000},async t=>{
+  const f=await fixture();t.after(()=>f.process.kill());const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});t.after(()=>browser.close());const page=await browser.newPage();
+  await page.goto(f.url);await page.locator('#project-select').selectOption(f.pid);
+  const isPoll=r=>new URL(r.url()).pathname===`/api/projects/${f.pid}/updates`;
+  await page.waitForResponse(isPoll);const requests=[];page.on('request',r=>requests.push(new URL(r.url()).pathname));
+  const response=await page.waitForResponse(isPoll);const body=await response.text();assert.ok(body.length<80,body);assert.deepEqual(Object.keys(JSON.parse(body)).sort(),['content','progress']);
+  assert.equal(requests.filter(path=>path===`/api/projects/${f.pid}`).length,0);
 });
 test('232 clips render a bounded window and two video elements',{timeout:45000},async t=>{
   const f=await fixture();t.after(()=>f.process.kill());const browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'});t.after(()=>browser.close());const page=await browser.newPage();await page.goto(f.url);
@@ -68,9 +82,9 @@ test('232 clips render a bounded window and two video elements',{timeout:45000},
   await page.locator('#scale-test .timeline-block-video[data-item="large-231"]').waitFor();
   assert.ok(await page.locator('#scale-test .timeline-block-video').count()<232);
   await page.setViewportSize({width:800,height:1000});
-  assert.equal(await page.locator('#scale-test .timeline-lane').count(),3);
+  assert.equal(await page.locator('#scale-test .timeline-lane').count(),4);
   const sizes=await page.locator('#scale-test .montage-timeline').evaluate(n=>({client:n.clientWidth,scroll:n.scrollWidth}));assert.ok(sizes.scroll<=sizes.client+2);
-  await page.locator('#scale-test').getByText('Список сцен',{exact:true}).click();
+
   for(let i=0;i<7;i++)await page.locator('#scale-test').getByRole('button',{name:'Лента ›',exact:true}).click();
   assert.equal(await page.locator('#scale-test .montage-clip').count(),8);assert.equal(await page.locator('#scale-test video').count(),2);
   await page.evaluate(()=>window.scaleEditor.dispose());

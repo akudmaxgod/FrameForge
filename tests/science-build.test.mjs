@@ -4,7 +4,7 @@ import {buildScienceMovie} from '../imagegen/static/science-build.mjs';
 function fixture(){
  const calls=[],state={revision:1,doc:{clips:[{scene_id:'s'}],audio_tracks:[{role:'voice',enabled:true}]}};
  let saved;const options={id:'p',getState:()=>state,flush:async()=>calls.push('flush'),synchronize:async()=>calls.push('sync'),progress:()=>{},wait:async()=>{},saveCheckpoint:c=>{saved=c;},accept:r=>{state.revision=r.revision;state.doc=r.document;},api:async(path,data)=>{
-  calls.push({path,data});if(path.endsWith('/voice-fit'))return {id:'fit',status:'queued'};
+  calls.push({path,data});if(path.endsWith('/science-atlas/grounding'))return {pending:0,total:0,deferred:0};if(path.endsWith('/voice-fit'))return {id:'fit',status:'queued'};
   if(path.endsWith('/voice-fit/fit'))return {id:'fit',status:'ready',proposal:{can_apply:true}};
   if(path.endsWith('/apply'))return {revision:2,document:state.doc};
   if(path.endsWith('/export'))return {id:'mp4',status:'queued'};

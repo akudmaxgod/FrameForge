@@ -123,7 +123,7 @@ class Application:
             owner=service.db.one('SELECT project_id FROM '+parts[1]+' WHERE id=?',(parts[2],))
             if owner:service.project(owner['project_id'])
         if method == 'GET' and path == '/api/editorial-capabilities':
-            return {'version': 2, 'scoped_scene_batches': True, 'park_unknown_flow_admission': True, 'application': 'FrameForge', 'release_version': '0.2.0rc5', 'bridge_version': '0.1.104'}
+            return {'version': 2, 'scoped_scene_batches': True, 'park_unknown_flow_admission': True, 'application': 'FrameForge', 'release_version': '0.2.0rc6', 'bridge_version': '0.1.104'}
         if method == 'GET' and path == '/api/session':
             return {'token': self.token}
         if method == 'GET' and path == '/api/settings':
@@ -570,6 +570,14 @@ class Application:
         if len(parts) >= 3 and parts[:2] == ['api', 'projects']:
             project_id = parts[2]
             service.project(project_id)
+            if len(parts)==4 and parts[3]=='updates' and method=='GET':
+                from .project_updates import poll
+                params=query_params or {}
+                return poll(service,project_id,(params.get('content') or [None])[0],(params.get('progress') or [None])[0])
+            if len(parts)==5 and parts[3:]==['science-atlas','grounding']:
+                from .science_grounding import prepare_project,status
+                if method=='POST':return prepare_project(service,project_id)
+                if method=='GET':return status(service,project_id)
             if len(parts)==5 and parts[3:]==['science-atlas','preview'] and method=='POST':
                 from .science_atlas_render import compile_commands
                 return compile_commands((data or {}).get('plan',{}))
@@ -818,6 +826,8 @@ class Application:
                         return self.edit_exports.get(project_id, parts[5])
                     if len(parts) == 7 and parts[6] == 'cancel' and method == 'POST':
                         return self.edit_exports.cancel(project_id, parts[5])
+                    if len(parts)==7 and parts[6]=='resume' and method=='POST':
+                        return self.edit_exports.resume(project_id,parts[5])
                 raise DomainError('Не найдено.', 404)
             if len(parts)==4 and parts[3]=='source-review-status' and method=='GET':
                 from .source_review_status import public_reports
@@ -1215,6 +1225,7 @@ def make_server(app, port=8765):
                 if method == 'POST' and path == '/api/shutdown':
                     if self.headers.get('X-Session-Token') != app.token:
                         raise DomainError('Недействительная сессия.', 403)
+                    app.edit_exports.begin_shutdown()
                     self.send_body(200, json.dumps({'status': 'shutting_down'}).encode())
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return

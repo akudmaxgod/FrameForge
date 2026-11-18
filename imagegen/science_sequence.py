@@ -2,8 +2,8 @@
 import copy,math,re
 from collections import Counter
 
-VERSION=1
-MODES=('slide_explain','staged_explain','focus_explain','detail_explain')
+VERSION=2
+MODES=('slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain')
 
 def arrange_scenes(scenes,force=False):
     result=copy.deepcopy(scenes);candidates=[];eligible=[];previous_key=None
@@ -31,7 +31,7 @@ def arrange_scenes(scenes,force=False):
         previous_key=keys[0]
     # Select explanatory anchors by meaning, then enforce breathing room between them.
     anchors=set();cap=max(1,math.ceil(len(eligible)*.23))
-    fixed={i for i,s in enumerate(result) if s.get('data',s).get('science_atlas',{}).get('presentation_motion')=='slide_explain'
+    fixed={i for i,s in enumerate(result) if s.get('data',s).get('science_atlas',{}).get('presentation_motion') in ('slide_explain','panorama_explain')
            and s.get('data',s).get('science_atlas',{}).get('presentation_locked')}
     for record in sorted(candidates,key=lambda r:(-r['score'],r['index'])):
         i=record['index']
@@ -44,7 +44,10 @@ def arrange_scenes(scenes,force=False):
             last=[];previous_key=None;continue
         r=records[index]
         if index in anchors:
-            mode='slide_explain';reason='Ключевой ввод или объяснение механизма: крупный объект раскрывает место для схемы и пояснений.'
+            if r['function']=='mechanism' and r['duration']>=6 and len(p.get('reveal_steps',[]))>=3:
+                mode='panorama_explain';reason='Ключевой механизм: общий вид и крупные планы по речи при подтверждённых областях; иначе пояснения без предположений о геометрии.'
+            else:
+                mode='slide_explain';reason='Ключевой ввод или объяснение механизма: крупный объект раскрывает место для схемы и пояснений.'
         elif r['function'] in ('observation','summary','transition') or r['duration']<4.2:
             mode='focus_explain';reason='Наблюдение, итог или короткая реплика: спокойный крупный план с готовыми пояснениями.'
         elif p.get('detail_assets') and not p.get('explanatory_scheme'):
@@ -54,19 +57,23 @@ def arrange_scenes(scenes,force=False):
         if len(last)>=2 and last[-1]==last[-2]==mode and mode!='slide_explain':
             mode='focus_explain' if mode!='focus_explain' else 'staged_explain'
             reason+=' Смена подачи прерывает повтор соседних постановок.'
-        if mode=='slide_explain':
+        if mode in ('slide_explain','panorama_explain'):
             direction='right' if reveal_no%3==2 else 'left';reveal_no+=1
         elif r['key']==previous_key:direction=previous_direction
         else:direction='left'
         p.update(presentation_motion=mode,slide_direction=direction,sequence_arrangement_version=VERSION,sequence_reason=reason)
         last.append(mode);last=last[-2:];previous_key=r['key'];previous_direction=direction
     counts=Counter(s.get('data',s).get('science_atlas',{}).get('presentation_motion','none') for s in result)
-    return result,{'version':VERSION,'counts':dict(counts),'reveal_positions':[i+1 for i,s in enumerate(result) if s.get('data',s).get('science_atlas',{}).get('presentation_motion')=='slide_explain']}
+    return result,{'version':VERSION,'counts':dict(counts),'reveal_positions':[i+1 for i,s in enumerate(result) if s.get('data',s).get('science_atlas',{}).get('presentation_motion') in ('slide_explain','panorama_explain')]}
 
 
 def arrange_analysis(analysis):
     """Apply the shared scientific montage policy without changing caller data."""
     result=copy.deepcopy(analysis)
+    from .science_script import prepare_plan
+    for scene in result.get('scenes',[]):
+        data=scene.get('data',scene)
+        if data.get('science_atlas'):data['science_atlas']=prepare_plan(data['science_atlas'],data.get('source_quote',''),data.get('source_start',0))
     result['scenes'],report=arrange_scenes(result.get('scenes',[]))
     result.setdefault('diagnostics',{}).setdefault('science_atlas',{})['sequence_arrangement']=report
     return result

@@ -15,6 +15,12 @@ def fixture(direction='left',duration=6):
  'cue_ms':[700]}
 
 class RevealTests(unittest.TestCase):
+ def test_late_spoken_caption_does_not_appear_before_its_words(self):
+  p=fixture();p['reveal_steps']=[{'cue_quote':'Свет поступает','title':'Свет','at_ms':5900,'timing_source':'audio_alignment'}]
+  command={'type':'text','motion_group':'support','reveal_group':0}
+  self.assertEqual(command_state(p,command,5.8)['progress'],0);self.assertGreater(command_state(p,command,5.95)['progress'],0)
+  code="import {slideCommandState} from './imagegen/static/science-slide-reveal.mjs';const p="+json.dumps(p)+";console.log(JSON.stringify(slideCommandState(p,"+json.dumps(command)+",5.95)));"
+  result=json.loads(subprocess.check_output(['node','--input-type=module','-e',code],text=True));self.assertEqual(result,command_state(p,command,5.95))
  def test_mirror_motion_safe_bounds_and_seek(self):
   for duration in (.05,.2,1,2,6,60):
    a,b=fixture('left',duration),fixture('right',duration)

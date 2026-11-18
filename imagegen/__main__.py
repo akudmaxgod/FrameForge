@@ -44,19 +44,31 @@ def main():
         if args.open:
             threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
         try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
+            while True:
+                try:
+                    server.serve_forever()
+                    break
+                except KeyboardInterrupt:
+                    from .domain import DomainError
+                    try:app.edit_exports.begin_shutdown()
+                    except DomainError as error:
+                        if error.status!=409:raise
+                        logging.warning('%s',error)
+                        continue
+                    break
         except Exception:
             logging.exception('Fatal server exception in serve_forever')
             raise
         finally:
+            from .science_grounding import shutdown as stop_grounding
+            stop_grounding(wait=False)
             app.google_queue_worker.stop()
             app.voice.stop()
             app.worker.stop()
             from .media_analysis import LlamaServerManager
             if LlamaServerManager._instance is not None:
                 LlamaServerManager._instance.stop()
+            stop_grounding(wait=True)
             app.runtime.stop_all()
             server.server_close()
             session_marker.unlink(missing_ok=True)

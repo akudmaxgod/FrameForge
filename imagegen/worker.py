@@ -1151,7 +1151,10 @@ class Worker:
             # real panel boundary breaks visual continuity; a thin in-scene
             # stripe frequently has matching colour/texture on both sides.
             side_gap = np.abs(left.mean(axis=1) - right.mean(axis=1)).mean()
-            return bool(side_gap >= 12.0)
+            confirmed=bool(side_gap>=12.0)
+            if confirmed:
+                image.info['_frameforge_separator']={'color':seam_colour.tolist(),'variation':float(seam_luma.std())}
+            return confirmed
 
         def has_divider(coverage, length, axis):
             # Outer borders are framing, not a split. Panel gutters are inside
@@ -1444,6 +1447,27 @@ class Worker:
                 errors.append(type(error).__name__)
         return record_population_review(snapshot, counts, method='yolo_geometry', errors=errors)
 
+    def _panel_layout_requires_rejection(self, snapshot, image):
+        if not self._has_panel_grid(image):
+            return False
+        scene=snapshot.get('scene') or {}
+        source=(snapshot.get('source_contract') or {}).get('source') or {}
+        quote=str(scene.get('source_quote') or source.get('quote') or scene.get('manual_prompt') or '')
+        # A source-grounded window frame can be pixel-identical to a panel gutter.
+        # Preserve the candidate and record uncertainty instead of paying for a retry.
+        import re
+        architectural=bool(re.search(r'(?i)\b(?:window(?:s|pane|panes)?|mullion\w*|окон\w*|окн\w*|витраж\w*|перепл[её]т\w*)\b',quote))
+        evidence=image.info.get('_frameforge_separator') or {}
+        color=evidence.get('color') or [0,0,0]
+        digital=bool(min(color)>=250 and evidence.get('variation',999)<=2)
+        uncertain=architectural or not digital
+        snapshot['panel_layout_review']={'version':'panel-layout/2',
+            'status':'needs_review' if uncertain else 'rejected',
+            'enforcement':'advisory' if uncertain else 'strict',
+            'reason':'source_architecture_ambiguous' if architectural else 'ambiguous_scene_edge' if uncertain else 'panel_separator_detected',
+            'source_quote':quote if architectural else ''}
+        return not uncertain
+
     def _validate_external_scene_image_strict(self, snapshot, data):
         """Apply the FrameForge composition contract to an image returned by Flow."""
         from PIL import Image
@@ -1453,7 +1477,7 @@ class Worker:
             if image.size != expected:
                 raise ContentRejectedError(f'Flow вернул {image.size}, ожидалось {expected}. Кадр не принят.')
             image = image.convert('RGB')
-            if self._has_panel_grid(image):
+            if self._panel_layout_requires_rejection(snapshot, image):
                 raise ContentRejectedError('Кадр выглядит как разделение на несколько сцен или панелей. Кадр не принят.')
             self._validate_matte(image)
             if self._has_embedded_text(image):
@@ -1473,7 +1497,7 @@ class Worker:
     def _validate_generated_composition(self, generation, snapshot, image):
         if not visual_reviews_enabled() and self._advisory_quality(snapshot):
             return
-        if self._has_panel_grid(image):
+        if self._panel_layout_requires_rejection(snapshot, image):
             raise ContentRejectedError('Кадр выглядит как сетка из нескольких панелей. Кадр не принят.')
         self._validate_matte(image)
         if self._has_embedded_text(image):

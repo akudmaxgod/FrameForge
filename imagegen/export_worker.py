@@ -77,6 +77,15 @@ class VideoReader:
         from .gpu_pixels import fit
         return fit(source,size,fill)
 
+    def gpu_image(self,seconds,size,fill=False):
+        from .gpu_pixels import image_from_video,fit_gpu
+        while self.next is not None and float(self.next.time or 0)-self.origin<=seconds+1e-6:
+            self.previous,self.next=self.next,next(self.frames,None)
+        frame=self.previous or self.next
+        if frame is None:raise ValueError('Не удалось декодировать видеоклип.')
+        source=image_from_video(frame,gpu=True)
+        return source if (source.shape[1],source.shape[0])==size else fit_gpu(source,size,fill)
+
     def close(self):
         self.container.close()
 
@@ -128,14 +137,59 @@ class AudioReader:
         self.container.close()
 
 
-def render(service, document, output, progress, cancelled, size=(1280,720)):
+def mix_audio_block(timeline,document,sample_start,count,audios,path):
+    samples=np.zeros((2,count),dtype=np.float32)
+    clock=(sample_start+np.arange(count))/RATE*1000
+    sources=[]
+    for a in timeline['audio_tracks']:
+        if a.get('enabled',True):
+            sources.append((a['role'],a['asset_id'],a['offset_ms'],a['trim_in_ms'],a['trim_out_ms']-a['trim_in_ms'],a.get('volume',1),a.get('fade_in_ms',0),a.get('fade_out_ms',0),None))
+    if document.get('source_audio'):
+        for c in timeline['clips']:
+            if c.get('media_type')!='image' and not c.get('muted',True) and c['start_ms']<clock[-1]+1 and c['end_ms']>clock[0]:
+                sources.append(('clip:'+c['edit_clip_id'],c['source_video_asset_id'],c['start_ms'],c['trim_in_ms'],min(c['duration_ms'],(c['trim_out_ms']-c['trim_in_ms'])/c.get('playback_rate',1)),c.get('volume',1),0,0,c))
+    audio_ids=set()
+    for key,aid,start,trim,length,volume,fade_in,fade_out,clip in sources:
+        mask=(clock>=start)&(clock<start+length)
+        positions=np.flatnonzero(mask)
+        if not len(positions):
+            continue
+        audio_ids.add(key)
+        lo,hi=int(positions[0]),int(positions[-1])+1
+        seconds=(trim+clock[lo]-start)/1000
+        if key not in audios:
+            audios[key]=AudioReader(path(aid),seconds)
+        local=clock[lo:hi]-start
+        gain=np.full(hi-lo,volume,dtype=np.float32)
+        if fade_in:
+            gain*=np.minimum(1,local/fade_in)
+        if fade_out:
+            gain*=np.minimum(1,(length-local)/fade_out)
+        if clip:
+            gain*=np.array([opacity(clip,t) for t in clock[lo:hi]],dtype=np.float32)
+            if clip['out_kind']=='dissolve' and clip['out_ms']:
+                gain*=np.minimum(1,(clip['end_ms']-clock[lo:hi])/clip['out_ms'])
+        samples[:,lo:hi]+=audios[key].read(seconds,hi-lo)*gain
+    for key in list(audios):
+        if key not in audio_ids:
+            audios.pop(key).close()
+    np.clip(samples,-1,1,out=samples)
+    return samples
+
+
+def render(service, document, output, progress, cancelled, size=(1280,720), frame_range=None, include_audio=True):
     from .gpu_pixels import effects as apply_effects
     timeline = normalize(document)
     effects = document.get('visual_effects') or {}
     duration = timeline['duration_ms']
-    frames = math.ceil(duration*24/1000)
+    fps=document.get('export_settings',{}).get('fps',24)
+    if type(fps) is not int or fps not in (24,30,60):raise DomainError('Выберите 24, 30 или 60 кадров/с.')
+    frames = math.ceil(duration*fps/1000)
+    total_audio_samples=math.ceil(duration*RATE/1000)
     videos, audios = {}, {}
-    use_audio = document.get('source_audio') or any(a.get('enabled',True) for a in document['audio_tracks'])
+    use_audio = include_audio and (document.get('source_audio') or any(a.get('enabled',True) for a in document['audio_tracks']))
+    first_frame,last_frame=frame_range or (0,frames)
+    first_sample=first_frame*RATE//fps
     paths = {}
     def path(aid):
         if aid not in paths:
@@ -143,7 +197,7 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
         return paths[aid]
     try:
         with av.open(str(output),'w',format='mp4',options={'movflags':'+faststart'}) as out:
-            video = out.add_stream('h264_nvenc',rate=24)
+            video = out.add_stream('h264_nvenc',rate=fps)
             video.width,video.height=size
             video.pix_fmt='yuv420p'
             video.options={'preset':'p4','cq':'20','rc':'vbr'}
@@ -151,15 +205,16 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
             if audio:
                 audio.layout='stereo'
                 audio.bit_rate=192000
-            black = Image.new('RGB', size, 'black')
-            white = Image.new('RGB', size, 'white')
+            from .gpu_pixels import cuda
+            cp=cuda();black=cp.zeros((size[1],size[0],3),dtype=cp.uint8);white=cp.full_like(black,255)
+            label_gpu=None
             clips = timeline['clips']
             active = []
             next_clip = 0
-            for index in range(frames):
+            for index in range(first_frame,last_frame):
                 if cancelled():
                     raise InterruptedError('Экспорт отменён.')
-                time_ms=index*1000/24
+                time_ms=index*1000/fps
                 active = [c for c in active if time_ms < c['end_ms']]
                 while next_clip < len(clips) and clips[next_clip]['start_ms'] <= time_ms:
                     clip = clips[next_clip]
@@ -183,74 +238,44 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
                                 videos[cid]=ScienceReader(atlas,path)
                             elif c.get('foreground_effect'):
                                 from .montage_foreground import ForegroundReader
-                                videos[cid] = ForegroundReader(path(c['source_image_asset_id']), c, path)
+                                videos[cid] = ForegroundReader(path(c['source_image_asset_id']), {**c,'output_fps':fps}, path)
                             else:
                                 from .montage_media import StillReader
-                                videos[cid] = StillReader(path(c['source_image_asset_id']), c)
+                                videos[cid] = StillReader(path(c['source_image_asset_id']), {**c,'output_fps':fps})
                         else:videos[cid]=VideoReader(path(c['source_video_asset_id']),seconds)
                     if c.get('media_type')!='image':seconds=min(seconds,max(c['trim_in_ms']/1000,c['trim_out_ms']/1000-.001))
                     reader=videos[cid]
-                    image=reader.gpu_image(seconds,size) if getattr(reader,'slide',False) else reader.image(seconds,size,fill=c.get('framing')=='fill')
+                    if getattr(reader,'slide',False):image=reader.gpu_image(seconds,size)
+                    elif hasattr(reader,'gpu_image') and not hasattr(reader,'slide'):image=reader.gpu_image(seconds,size,fill=c.get('framing')=='fill')
+                    else:image=reader.image(seconds,size,fill=c.get('framing')=='fill')
                     fade=white_fade(c,time_ms)
                     if fade:image=gpu_blend(image,white,fade)
                     if c.get('illustrative'):
-                        from .gpu_pixels import cuda
-                        if isinstance(image,cuda().ndarray):image=Image.fromarray(cuda().asnumpy(image))
-                        image=illustrative_label(image.copy())
+                        if label_gpu is None:
+                            label=illustrative_label(Image.new('RGBA',size,(0,0,0,0)))
+                            rgba=cp.asarray(np.asarray(label),dtype=cp.float32);alpha_label=rgba[:,:,3:4]/255
+                            label_gpu=(rgba[:,:,:3]*alpha_label,alpha_label)
+                        rgb=cp.asarray(image if isinstance(image,cp.ndarray) else np.asarray(image),dtype=cp.float32)
+                        image=cp.clip(cp.rint(rgb*(1-label_gpu[1])+label_gpu[0]),0,255).astype(cp.uint8)
                     alpha = opacity(c, time_ms)
                     if alpha >= 1:
                         canvas = image
                     elif alpha > 0:
                         canvas = gpu_blend(canvas, image, alpha)
                 if active and effects:
-                    canvas = apply_effects(canvas, effects, index)
+                    canvas = apply_effects(canvas, effects, math.floor(index*24/fps))
                 frame=gpu_video_frame(canvas)
-                frame.pts=index
-                frame.time_base=Fraction(1,24)
+                frame.pts=index-first_frame
+                frame.time_base=Fraction(1,fps)
                 for packet in video.encode(frame):
                     out.mux(packet)
                 if audio:
-                    sample_start=index*2000
-                    count=2000
-                    samples=np.zeros((2,count),dtype=np.float32)
-                    clock=(sample_start+np.arange(count))/RATE*1000
-                    sources=[]
-                    for a in timeline['audio_tracks']:
-                        if a.get('enabled',True):
-                            sources.append((a['role'],a['asset_id'],a['offset_ms'],a['trim_in_ms'],a['trim_out_ms']-a['trim_in_ms'],a.get('volume',1),a.get('fade_in_ms',0),a.get('fade_out_ms',0),None))
-                    if document.get('source_audio'):
-                        for c in timeline['clips']:
-                            if c.get('media_type')!='image' and not c.get('muted',True) and c['start_ms']<clock[-1]+1 and c['end_ms']>clock[0]:
-                                sources.append(('clip:'+c['edit_clip_id'],c['source_video_asset_id'],c['start_ms'],c['trim_in_ms'],min(c['duration_ms'],(c['trim_out_ms']-c['trim_in_ms'])/c.get('playback_rate',1)),c.get('volume',1),0,0,c))
-                    audio_ids=set()
-                    for key,aid,start,trim,length,volume,fade_in,fade_out,clip in sources:
-                        mask=(clock>=start)&(clock<start+length)
-                        positions=np.flatnonzero(mask)
-                        if not len(positions):
-                            continue
-                        audio_ids.add(key)
-                        lo,hi=int(positions[0]),int(positions[-1])+1
-                        seconds=(trim+clock[lo]-start)/1000
-                        if key not in audios:
-                            audios[key]=AudioReader(path(aid),seconds)
-                        local=clock[lo:hi]-start
-                        gain=np.full(hi-lo,volume,dtype=np.float32)
-                        if fade_in:
-                            gain*=np.minimum(1,local/fade_in)
-                        if fade_out:
-                            gain*=np.minimum(1,(length-local)/fade_out)
-                        if clip:
-                            gain*=np.array([opacity(clip,t) for t in clock[lo:hi]],dtype=np.float32)
-                            if clip['out_kind']=='dissolve' and clip['out_ms']:
-                                gain*=np.minimum(1,(clip['end_ms']-clock[lo:hi])/clip['out_ms'])
-                        samples[:,lo:hi]+=audios[key].read(seconds,hi-lo)*gain
-                    for key in list(audios):
-                        if key not in audio_ids:
-                            audios.pop(key).close()
-                    np.clip(samples,-1,1,out=samples)
+                    sample_start=index*RATE//fps
+                    count=min((index+1)*RATE//fps,total_audio_samples)-sample_start
+                    samples=mix_audio_block(timeline,document,sample_start,count,audios,path)
                     af=av.AudioFrame.from_ndarray(samples,format='fltp',layout='stereo')
                     af.sample_rate=RATE
-                    af.pts=sample_start
+                    af.pts=sample_start-first_sample
                     af.time_base=Fraction(1,RATE)
                     for packet in audio.encode(af):
                         out.mux(packet)
@@ -266,7 +291,7 @@ def render(service, document, output, progress, cancelled, size=(1280,720)):
                 raise ValueError('В итоговом файле отсутствует дорожка.')
             if check.streams.video[0].codec_context.name!='h264' or (use_audio and check.streams.audio[0].codec_context.name!='aac'):
                 raise ValueError('Некорректный кодек результата.')
-        return frames/24
+        return (last_frame-first_frame)/fps
     finally:
         for reader in [*videos.values(),*audios.values()]:
             reader.close()
@@ -279,7 +304,24 @@ class ExportWorker:
         with self.db.transaction() as conn:
             conn.execute("UPDATE edit_exports SET status='interrupted', stage='Прервано перезапуском', updated_at=? WHERE status IN ('queued','running')",(now(),))
         self.lock=threading.Lock()
+        self.stopping=False
         self.slot=threading.Semaphore(1)
+
+    def begin_shutdown(self):
+        """Close export admission atomically, or leave the worker available."""
+        with self.lock:
+            active=self.db.all("SELECT id,project_id,status,progress,stage FROM edit_exports WHERE status IN ('queued','running') ORDER BY created_at")
+            if active:
+                error=DomainError('Сборка видео ещё выполняется. Дождитесь её окончания перед остановкой или обновлением.',409)
+                error.details={'code':'EXPORT_IN_PROGRESS','exports':active}
+                raise error
+            self.stopping=True
+
+    def require_accepting(self):
+        if self.stopping:
+            error=DomainError('Программа останавливается; новые экспорты не принимаются.',503)
+            error.details={'code':'APPLICATION_STOPPING'}
+            raise error
 
     def get(self, project_id, job_id):
         row=self.db.one('SELECT * FROM edit_exports WHERE id=? AND project_id=?',(job_id,project_id))
@@ -288,10 +330,15 @@ class ExportWorker:
         settings=json.loads(row.pop('snapshot')).get('export_settings',{'width':1280,'height':720})
         dimensions=self.db.one('SELECT width,height FROM assets WHERE id=?',(row['asset_id'],)) if row['asset_id'] else None
         row['width'],row['height']=(dimensions or settings)['width'],(dimensions or settings)['height']
+        row['fps']=settings.get('fps',24)
         row['url']=f"/api/assets/{row['asset_id']}?download=1" if row['asset_id'] else None
+        checkpoint=self.service.root/'assets'/project_id/'export-parts'/job_id
+        row['resumable']=row['status'] in ('failed','interrupted','cancelled') and checkpoint.is_dir() and any(checkpoint.glob('*/checkpoint.json'))
         return row
 
     def start(self, project_id, data):
+        with self.lock:
+            self.require_accepting()
         edit=self.service.editing.get(project_id)
         if data.get('expected_revision')!=edit['revision']:
             raise DomainError('Сначала сохраните текущую версию монтажа.',409)
@@ -301,7 +348,7 @@ class ExportWorker:
         video_end = normalize(doc)['duration_ms']
         voice_end = max((a.get('offset_ms', 0)+a['trim_out_ms']-a['trim_in_ms'] for a in doc['audio_tracks']
                          if a['role'] == 'voice' and a.get('enabled', True)), default=0)
-        if voice_end-video_end > 1000/24:
+        if voice_end-video_end > 1000/doc['export_settings'].get('fps',24):
             raise DomainError('Видеоряд заканчивается раньше озвучки. Дополните сцены или исправьте монтаж перед экспортом.', 409)
         for c in doc['clips']:
             state=edit['sources'][c['edit_clip_id']]
@@ -313,7 +360,10 @@ class ExportWorker:
             av.Codec('h264_nvenc','w');av.Codec('aac','w')
         except Exception as error:
             raise DomainError('Установите зависимости FrameForge (PyAV с FFmpeg H.264/AAC).',503) from error
+        from .export_preflight import require_ready
+        require_ready(self.service,doc)
         with self.lock, self.db.transaction() as conn:
+            self.require_accepting()
             states="('queued','running','completed')" if data.get('request_key') else "('queued','running')"
             row=conn.execute(f"SELECT id FROM edit_exports WHERE project_id=? AND edit_revision=? AND status IN {states} ORDER BY created_at DESC LIMIT 1",(project_id,edit['revision'])).fetchone()
             if row:
@@ -324,6 +374,23 @@ class ExportWorker:
         if not row:
             threading.Thread(target=self.run,args=(job,),daemon=True).start()
         return self.get(project_id,job)
+
+    def resume(self, project_id, job_id):
+        self.service.project(project_id)
+        with self.lock:
+            self.require_accepting()
+            job=self.get(project_id,job_id)
+            if job['status'] in ('queued','running','completed'):return job
+            if not job['resumable']:raise DomainError('Нет готовых частей для возобновления.',409)
+            edit=self.service.editing.get(project_id)
+            if edit['revision']!=job['edit_revision']:raise DomainError('Монтаж изменён. Начните новый экспорт.',409)
+            from .export_preflight import require_ready
+            self.service.editing.validate(project_id,edit['document'])
+            require_ready(self.service,edit['document'])
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE edit_exports SET status='queued',cancel_requested=0,error=NULL,stage='Продолжение с контрольной точки',updated_at=? WHERE id=?",(now(),job_id))
+        threading.Thread(target=self.run,args=(job_id,),daemon=True).start()
+        return self.get(project_id,job_id)
 
     def cancel(self, project_id, job_id):
         self.get(project_id,job_id)
@@ -351,7 +418,7 @@ class ExportWorker:
             return cancel_requested
         def progress(percent,stage):
             with self.db.transaction() as conn:
-                conn.execute('UPDATE edit_exports SET progress=?,stage=?,updated_at=? WHERE id=?',(percent,stage,now(),job_id))
+                conn.execute('UPDATE edit_exports SET progress=MAX(progress,?),stage=?,updated_at=? WHERE id=?',(percent,stage,now(),job_id))
         try:
             with self.slot:
                 if cancelled(force=True):
@@ -361,7 +428,8 @@ class ExportWorker:
                 document=json.loads(row['snapshot'])
                 settings=document['export_settings']
                 size=(settings['width'],settings['height'])
-                render(self.service,document,temporary,progress,cancelled,size=size)
+                from .export_checkpoint import render_resumable
+                render_resumable(self.service,document,temporary,progress,cancelled,size=size,job_id=job_id)
                 if cancelled(force=True):
                     raise InterruptedError()
                 digest=hashlib.sha256()
@@ -376,6 +444,12 @@ class ExportWorker:
                     conn.execute("INSERT INTO generations(id,project_id,purpose,state,snapshot,seed,asset_id,created_at) VALUES(?,?,'edit_export','succeeded',?,0,?,?)",(gid,row['project_id'],row['snapshot'],aid,now()))
                     conn.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?)',(aid,row['project_id'],gid,str(final.relative_to(self.service.root)),digest.hexdigest(),size[0],size[1],final.stat().st_size))
                     conn.execute("UPDATE edit_exports SET status='completed',progress=100,stage='Готово',asset_id=?,updated_at=? WHERE id=?",(aid,now(),job_id))
+                try:
+                    from .export_checkpoint import discard_completed
+                    discard_completed(final,job_id)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).warning('Completed export cache cleanup skipped',exc_info=True)
         except Exception as error:
             temporary.unlink(missing_ok=True)
             final.unlink(missing_ok=True)

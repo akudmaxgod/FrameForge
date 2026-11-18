@@ -198,7 +198,7 @@ def gesture_angle(t, strength, direction):
 
 def phase(clip, seconds):
     elapsed_ms = (seconds * 1000 - clip['trim_in_ms']) / clip.get('playback_rate', 1)
-    return max(0, min(1, elapsed_ms / max(1000 / 24, clip['base_duration_ms'] - 1000 / 24)))
+    return max(0, min(1, elapsed_ms / max(1000 / clip.get('output_fps',24), clip['base_duration_ms'] - 1000 / clip.get('output_fps',24))))
 
 
 def drift(t, width, strength):

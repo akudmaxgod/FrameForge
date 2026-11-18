@@ -1,3 +1,4 @@
+import {drawScriptScene,retimedRevealSteps} from './science-script.mjs';
 const INITIAL=[72,72,1776,936],FINAL=[72,240,1070,600];
 export function slideTimeline(plan){const duration=Math.max(1,(plan.illustration_motion?.duration_seconds??6)*1000),unit=Math.min(1,duration/4000),hold=(plan.presentation_motion||'slide_explain')==='slide_explain'?700*unit:0,move=(plan.presentation_motion||'slide_explain')==='slide_explain'?780*unit:1;return {duration,hold,move,end:hold+move,settle:Math.min(450*unit,duration*.15)};}
 export function slideState(plan,seconds){
@@ -8,15 +9,18 @@ export function slideState(plan,seconds){
  return {rect,final_rect:final,progress:p,opacity:Math.max(0,Math.min(1,t/Math.max(1,200*Math.min(1,timing.duration/4000))))};
 }
 export function slideCommandState(plan,c,seconds){
+ if(c.always_visible)return {start:0,progress:1,opacity:1};
  const timing=slideTimeline(plan),unit=Math.min(1,timing.duration/4000),cue=Number.isInteger(c.cue_index)?plan.cue_ms?.[c.cue_index]:null;
  if(timing.duration<(c.min_duration_ms||0))return {start:timing.duration,progress:0,opacity:0};
  let start=typeof cue==='number'&&Number.isFinite(cue)?cue:0;
+ const steps=retimedRevealSteps(plan);let speechAnchor=false;if(c.motion_group==='support'&&steps.length&&Math.trunc(c.reveal_group||0)<steps.length){const step=steps[Math.trunc(c.reveal_group||0)];start=Math.max(start,Number(step.at_ms||0));speechAnchor=step.timing_source==='audio_alignment';}
  if(c.motion_group!=='illustration'){const mode=plan.presentation_motion||'slide_explain',base=mode==='slide_explain'?timing.end:mode==='focus_explain'?80*unit:200*unit,gap=mode==='focus_explain'?0:220*unit;start=Math.max(start,base+Math.min(c.reveal_group||0,6)*gap);if(mode==='detail_explain'&&c.support_role==='detail')start=Math.max(120*unit,typeof cue==='number'?cue:0);if(plan.support_reveal_ms)start=Math.max(start,plan.support_reveal_ms);}
- const span=(plan.presentation_motion==='focus_explain'?180:c.type==='text'?350:420)*unit;start=Math.min(Math.max(0,start),Math.max(0,timing.duration-timing.settle-span));
+ const span=(plan.presentation_motion==='focus_explain'?180:c.type==='text'?350:420)*unit;start=speechAnchor?Math.max(0,start):Math.min(Math.max(0,start),Math.max(0,timing.duration-timing.settle-span));
  const progress=Math.max(0,Math.min(1,(seconds*1000-start)/Math.max(1,span)));
  return {start,progress,opacity:c.type==='text'?Math.min(1,progress*3):1};
 }
 export async function drawSlideReveal(ctx,still,plan,seconds,background){
+ if(plan.presentation_motion==='panorama_explain'&&plan.script_scene)return drawScriptScene(ctx,still,plan,seconds,background);
  still.atlasImages??=new Map();
  for(const c of plan.commands||[])if(c.type==='image'&&!still.atlasImages.has(c.asset_id)){const im=new Image();im.src='/api/assets/'+c.asset_id;await im.decode();still.atlasImages.set(c.asset_id,im);}
  ctx.save();ctx.fillStyle=background;ctx.fillRect(0,0,ctx.canvas.width,ctx.canvas.height);ctx.scale(ctx.canvas.width/1920,ctx.canvas.height/1080);

@@ -54,11 +54,11 @@ export function fitTextCommands(commands,ctx,duration=6){
 }
 export async function drawScienceAtlas(ctx,still,plan,seconds){
   await loadFont();
-  if(['slide_explain','staged_explain','focus_explain','detail_explain'].includes(plan.presentation_motion))return drawSlideReveal(ctx,still,plan,seconds,ATLAS.background);
+  if(['slide_explain','staged_explain','focus_explain','detail_explain','panorama_explain'].includes(plan.presentation_motion))return drawSlideReveal(ctx,still,plan,seconds,ATLAS.background);
   const typographyKey=JSON.stringify([plan.commands,plan.text_animation,plan.explanatory_scheme,plan.cue_ms,plan.illustration_motion]);
   if(still.typographyKey!==typographyKey){still.typesetCommands=fitTextCommands(playbackCommands(plan),ctx,plan.illustration_motion?.duration_seconds||6);still.typographyKey=typographyKey;}
   const commands=still.typesetCommands;
-  const visible=visibleNodes(plan,seconds),focus=plan.presentation==='visual_first'?focusState(plan,seconds):null,signature=JSON.stringify([commands,visible,focus?.phase,ctx.canvas.width,ctx.canvas.height,commands.filter(c=>c.at_ms).map(c=>seconds*1000>=c.at_ms),(plan.illustration_motion?.strength||commands.some(c=>c.typing_cps||c.draw_ms||c.type==='pulse'))?Math.round(seconds*24):null]);
+  const visible=visibleNodes(plan,seconds),focus=plan.presentation==='visual_first'?focusState(plan,seconds):null,signature=JSON.stringify([commands,visible,focus?.phase,ctx.canvas.width,ctx.canvas.height,commands.filter(c=>c.at_ms).map(c=>seconds*1000>=c.at_ms),(plan.illustration_motion?.strength||commands.some(c=>c.typing_cps||c.draw_ms||c.type==='pulse'))?Math.round(seconds*1000):null]);
   if(still.atlasSignature!==signature){
     const canvas=document.createElement('canvas');canvas.width=ctx.canvas.width;canvas.height=ctx.canvas.height;
     const draw=canvas.getContext('2d');draw.fillStyle=ATLAS.background;draw.fillRect(0,0,canvas.width,canvas.height);draw.scale(canvas.width/1920,canvas.height/1080);

@@ -38,7 +38,8 @@ class StillReader:
             total_ms=self.clip.get('camera_motion_total_ms') or self.clip['base_duration_ms']
             duration=(total_ms-self.clip.get('hold_last_ms',0))/1000
             # Same last-frame phase as the application's streamed 2.5D path.
-            phase=seconds/max(1/24,duration-1/24)
+            fps=self.clip.get('output_fps',24)
+            phase=seconds/max(1/fps,duration-1/fps)
             x,y,w,h=camera_box(*self.source.size,plan,phase)
             # A portrait/non-16:9 photo keeps its proportions while moving.
             # Framing must agree with the static fit/fill path, never stretch.
@@ -75,4 +76,34 @@ class StillReader:
             self.static_frame = image
         return self.static_frame
 
-    def close(self):self.source.close()
+    def gpu_image(self,seconds,size,fill=False):
+        from .gpu_pixels import CudaImage,cuda,fit_gpu
+        cp=cuda()
+        if not hasattr(self,'gpu_source'):self.gpu_source=CudaImage(self.source)
+        plan=self.clip.get('camera_motion')
+        if not plan:
+            geometry=(size,fill)
+            if getattr(self,'gpu_geometry',None)!=geometry:
+                self.gpu_static=fit_gpu(self.gpu_source,size,fill);self.gpu_geometry=geometry
+            return self.gpu_static
+        total_ms=self.clip.get('camera_motion_total_ms') or self.clip['base_duration_ms']
+        duration=(total_ms-self.clip.get('hold_last_ms',0))/1000
+        fps=self.clip.get('output_fps',24)
+        phase=seconds/max(1/fps,duration-1/fps)
+        x,y,w,h=camera_box(*self.source.size,plan,phase)
+        if fill:
+            ratio=size[0]/size[1]
+            if w/h>ratio:next_w=h*ratio;x+=(w-next_w)/2;w=next_w
+            else:next_h=w/ratio;y+=(h-next_h)/2;h=next_h
+            output_size=size
+        else:
+            scale=min(size[0]/self.source.width,size[1]/self.source.height)
+            output_size=(max(1,round(self.source.width*scale)),max(1,round(self.source.height*scale)))
+        moving=self.gpu_source.resize_gpu(output_size,box=(x,y,min(self.source.width,x+w),min(self.source.height,y+h)))
+        if output_size==size:return moving
+        out=cp.zeros((size[1],size[0],3),dtype=cp.uint8);ox=(size[0]-moving.shape[1])//2;oy=(size[1]-moving.shape[0])//2
+        out[oy:oy+moving.shape[0],ox:ox+moving.shape[1]]=moving
+        return out
+
+    def close(self):
+        self.source.close();self.gpu_source=None;self.gpu_static=None

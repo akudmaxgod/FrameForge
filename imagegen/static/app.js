@@ -553,11 +553,22 @@ async function refresh(force=false){
   if(!current||refreshing)return;
   refreshing=true;const pid=current;
   try{
-    const next=await api('/projects/'+pid);
+    let next,progressOnly=false;
+    if(!force&&project?.id===pid&&project.updates){
+      const cursor=project.updates,update=await api(`/projects/${pid}/updates?content=${cursor.content}&progress=${cursor.progress}`);
+      if(current!==pid)return;
+      if(update.content===cursor.content){
+        if(update.progress===cursor.progress)return;
+        progressOnly=true;next={...project,generations:project.generations.map(g=>({...g,...(update.generations||[]).find(x=>x.id===g.id)})),
+          voice_workflow:update.voice_workflow?{...project.voice_workflow,...update.voice_workflow}:project.voice_workflow,
+          updates:{content:update.content,progress:update.progress}};
+      }
+    }
+    if(!next)next=await api('/projects/'+pid);
     if(current!==pid||olderProjectSnapshot(next,project))return;
     const editing=['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)||Boolean(document.querySelector('.editorial-controls[open], .source-passport[open], .queue-recovery[open]'));
     const liveAnalysis=next.generations?.some(g=>g.purpose==='analysis'&&isActiveGeneration(g));
-    const changed=force||liveAnalysis||JSON.stringify(next)!==JSON.stringify(project);
+    const changed=force||liveAnalysis||progressOnly||JSON.stringify(next)!==JSON.stringify(project);
     if(changed){
       project=next;
       if(!selectedSubject||!project.characters.some(c=>c.id===selectedSubject))selectedSubject=referenceSubjects()[0]?.id||null;
@@ -1940,7 +1951,7 @@ function renderCompactAnimationControl(scene,display,anim){
   }
   box.append(row);
   if(scene.data?.science_atlas&&(scene.data.science_atlas.asset_keys||[]).length===1){
-    const atlas=scene.data.science_atlas,motion=selectOptions([['','Прежняя постановка'],['slide_explain','Раскрытие со смещением'],['staged_explain','Пояснения без смещения'],['focus_explain','Спокойный крупный план'],['detail_explain','Общий вид и деталь']],atlas.presentation_motion||'','science-motion-'+scene.position,'Постановка научпопа');
+    const atlas=scene.data.science_atlas,motion=selectOptions([['','Прежняя постановка'],['slide_explain','Раскрытие со смещением'],['staged_explain','Пояснения без смещения'],['focus_explain','Спокойный крупный план'],['detail_explain','Общий вид и деталь'],['panorama_explain','Общий вид и панорама деталей']],atlas.presentation_motion||'','science-motion-'+scene.position,'Постановка научпопа');
     const direction=selectOptions([['left','Иллюстрация влево'],['right','Иллюстрация вправо']],atlas.slide_direction||'left','science-direction-'+scene.position,'Направление');
     const save=button('Сохранить постановку',async()=>{await api(`/scenes/${scene.id}/edit`,{revision:scene.current_revision,data:{science_atlas:{...atlas,presentation_motion:motion.value,slide_direction:direction.value,frame_density:motion.value?'filled':'legacy',presentation_locked:true}}});await refresh(true);showNotice('Постановка сохранена. Нажмите «Пересобрать» у кадра, затем соберите его видео.');},'secondary');
     box.append(motion,direction,save);
@@ -1949,7 +1960,7 @@ function renderCompactAnimationControl(scene,display,anim){
     const local=button(scene.video_asset_id?'Пересобрать видео со схемами':'Собрать видео со схемами',()=>scene.video_asset_id?rebuildScientificScene(scene.id):runSingleAnimation(scene.id,'ken_burns'),'secondary',`science-video-${scene.position}`);
     local.disabled=animationRunBusy||pendingCloudAnimation(scene)||!approved||!display?.asset_id||scene.stale;
     local.title='Локальная сборка на видеокарте: иллюстрации, подписи и схемы по таймингам. Без генерации в Flow.';box.append(local);
-    if(scene.video_asset_id&&(anim.science_renderer_version||0)<(scene.data.science_atlas.presentation_motion==='slide_explain'?6:scene.data.science_atlas.frame_density==='filled'?7:4))box.append(el('small','Обновлена анимация схем и текста — пересоберите этот ролик.','muted'));
+    if(scene.video_asset_id&&(anim.science_renderer_version||0)<(scene.data.science_atlas.reveal_steps?.length>=2?8:scene.data.science_atlas.presentation_motion==='slide_explain'?6:scene.data.science_atlas.frame_density==='filled'?7:4))box.append(el('small','Обновлена анимация схем и текста — пересоберите этот ролик.','muted'));
   }
   const staging=scene.data.compact_staging||{};
   const action=scene.data.science_atlas?.focus||staging.action||scene.data.audit_visual_direction||scene.data.composition||scene.data.beat;
