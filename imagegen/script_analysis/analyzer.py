@@ -41,13 +41,15 @@ class Analyzer:
         self.api_key = api_key
 
     def analyze(self, script: str, *, use_cache: bool = True,
-                on_progress: Callable[[str, int], None] | None = None) -> AnalysisResult:
+                on_progress: Callable[[str, int], None] | None = None, cache_only: bool = False) -> AnalysisResult:
         if not isinstance(script, str) or not script.strip() or len(script) > 70000:
             raise ValueError("Сценарий должен содержать от 1 до 70000 символов и не быть пустым.")
         started = time.perf_counter()
         key = script_key(script)
         stats = Stats()
         try:
+            if use_cache:
+                self.cache.ensure_writable()
             with self.cache.lock(key) if use_cache else nullcontext():
                 warnings: list[str] = []
                 data = self.cache.load(key) if use_cache else None
@@ -71,7 +73,9 @@ class Analyzer:
                     except (KeyError, ValueError, TypeError, ValidationError):
                         warnings.append("Повреждённый результат кэша отклонён; выполнен новый разбор.")
                         log.warning("cache_invalid script_hash=%s", key)
-                client = self.client or JsonClient(api_key=self.api_key)
+                if cache_only:
+                    raise AnalysisError("Не найден базовый разбор этого сценария в кеше. Продолжение остановлено до обращения к DeepSeek.")
+                client = self.client or JsonClient(api_key=self.api_key, failed_dir=self.cache.directory.parent / "failures")
                 try:
                     if on_progress:
                         on_progress("DeepSeek Flash: извлечение глобального реестра (проход 1/2)", 25)
@@ -120,5 +124,5 @@ class Analyzer:
 
 
 def analyze(script: str, *, use_cache: bool = True, api_key: str | None = None,
-            on_progress: Callable[[str, int], None] | None = None) -> AnalysisResult:
-    return Analyzer(api_key=api_key).analyze(script, use_cache=use_cache, on_progress=on_progress)
+            on_progress: Callable[[str, int], None] | None = None, cache=None, cache_only=False) -> AnalysisResult:
+    return Analyzer(api_key=api_key, cache=cache).analyze(script, use_cache=use_cache, on_progress=on_progress,cache_only=cache_only)

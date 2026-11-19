@@ -84,6 +84,16 @@ class CoverageSelectionTests(unittest.TestCase):
         self.assertEqual(picked['selected_proposal_ids'], ['p6','p7','p8','p9'])
         self.assertEqual(picked['coverage']['animated_clips_protected'], 3)
 
+    def test_explicit_video_coverage_keeps_manual_locks_and_existing_inserts(self):
+        doc=document([1000]*4)
+        for c in doc['clips']:c.update(media_type='video',source_video_asset_id='video')
+        doc['clips'][1]['media_replacement_locked']=True
+        doc['clips'][2]['footage_overlay']={'source_kind':'footage','enabled':True,'media_type':'image','trim_in_ms':0,'trim_out_ms':1000}
+        self.assertEqual(select(doc,proposals(doc),{'mode':'matched'})['selected_proposal_ids'],[])
+        result=select(doc,proposals(doc),{'mode':'matched','cover_animated_sources':True})
+        self.assertEqual(result['selected_proposal_ids'],['p0','p3'])
+        self.assertEqual(result['skipped']['p1'],'locked');self.assertEqual(result['skipped']['p2'],'existing_footage')
+
     def test_dissolves_use_interval_union_not_sum(self):
         doc = document([1000, 1000])
         doc['transitions'] = [{'left': '0', 'right': '1', 'kind': 'dissolve', 'duration_ms': 400}]
@@ -197,6 +207,17 @@ class CoverageServiceTests(unittest.TestCase):
         self.assertNotIn('footage_overlay', clips[5])
         restored = self.s.montage_inserts.rollback_proposal(self.pid, proposal)
         self.assertEqual(restored['document']['clips'][3], doc['clips'][3])
+
+    def test_explicit_video_overlay_preserves_source_clock_and_rollback(self):
+        self.s.import_scene_video(self.scenes[5]['id'],self.fix._create_valid_mp4(width=160,height=90,duration=1),filename='animation.mp4')
+        before=self.s.editing.get(self.pid)['document'];proposal=self.record([self.choices[5]])
+        self.assertEqual(self.s.montage_inserts.preview_proposals(self.pid,proposal,{'mode':'matched'})['selected_proposal_ids'],[])
+        result=self.s.montage_inserts.apply_proposals(self.pid,proposal,coverage={'mode':'matched','cover_animated_sources':True})
+        self.assertEqual(result['applied_count'],1);after=result['document']
+        self.assertEqual(normalize(before)['duration_ms'],normalize(after)['duration_ms']);self.assertEqual(before['audio_tracks'],after['audio_tracks'])
+        self.assertEqual(after['clips'][5]['source_video_asset_id'],before['clips'][5]['source_video_asset_id']);self.assertIn('footage_overlay',after['clips'][5])
+        restored=self.s.montage_inserts.rollback_proposal(self.pid,proposal)
+        self.assertEqual(restored['document']['clips'],before['clips'])
 
     def test_preview_and_apply_accept_a_library_file_only_once(self):
         choices=copy.deepcopy(self.choices[:2]);choices[1]['candidate_segment']=copy.deepcopy(choices[0]['candidate_segment'])

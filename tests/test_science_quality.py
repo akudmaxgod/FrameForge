@@ -37,26 +37,33 @@ class ScienceQualityTests(unittest.TestCase):
   r=ScienceReader(plan,lambda aid:self.fail('No external illustration needed'))
   try:self.assertEqual(r.image(0,(640,360)).size,(640,360))
   finally:r.close()
- def test_semantic_review_repairs_before_caching_or_applying(self):
-  raw=data();fixed=copy.deepcopy(raw);fixed['shots'][0]['headline']='Light reaches the sensor';fixed['shots']=fixed['shots'][:1]
-  c=Client([raw,{'issues':[{'n':1,'code':'meaning','reason':'Focus missing from headline','correction':'Name the recorded signal'}]},fixed,{'issues':[]}])
+ def test_cached_review_resumes_locally_without_rebilling_or_losing_accepted_shots(self):
+  from imagegen.script_analysis.errors import AnalysisError
+  raw=data()
+  c=Client([raw,{'issues':[{'n':1,'code':'meaning','reason':'Focus missing from headline','correction':'Name the recorded signal'}]}])
   analysis={'characters':[],'scenes':[{'source_quote':STORY,'source_start':0,'source_end':len(STORY)}]}
   before=copy.deepcopy(analysis)
   with tempfile.TemporaryDirectory() as temp:
-   result=stage(analysis,STORY,client=c,cache=DiskCache(Path(temp)));self.assertEqual(c.calls,4);self.assertEqual(analysis,before);self.assertTrue(result['diagnostics']['science_atlas']['reviewed']);self.assertEqual(result['scenes'][0]['science_atlas']['headline'],'Light reaches the sensor')
-   again=stage(analysis,STORY,client=c,cache=DiskCache(Path(temp)));self.assertEqual(c.calls,4);self.assertEqual(result['scenes'],again['scenes'])
+   with self.assertRaises(AnalysisError):stage(analysis,STORY,client=c,cache=DiskCache(Path(temp)))
+   self.assertEqual(c.calls,2)
+   from unittest.mock import patch
+   with patch('imagegen.science_planner.JsonClient',side_effect=AssertionError('Paid client must not initialize')):
+    with self.assertRaises(AnalysisError):stage(analysis,STORY,cache=DiskCache(Path(temp)))
+   local=Client([{'issues':[]}]);result=stage(analysis,STORY,client=c,local_review=local,cache=DiskCache(Path(temp)))
+   self.assertEqual(c.calls,2);self.assertEqual(local.calls,1);self.assertEqual(analysis,before);self.assertTrue(result['diagnostics']['science_atlas']['reviewed'])
+   again=stage(analysis,STORY,client=c,cache=DiskCache(Path(temp)));self.assertEqual(c.calls,2);self.assertEqual(result['scenes'],again['scenes'])
  def test_spatial_review_uses_actual_signed_arrow_endpoints(self):
   from imagegen.science_planner import review_shot,Shot
   s=Shot.model_validate(shot(1,'A lens',layout='local_board',asset_keys=[],elements=[{'kind':'text','x':.05,'y':.1,'w':.2,'text':'left field'},{'kind':'text','x':.7,'y':.1,'w':.2,'text':'right field'},{'kind':'text','x':.05,'y':.8,'w':.2,'text':'left hemisphere'},{'kind':'text','x':.7,'y':.8,'w':.2,'text':'right hemisphere'},{'kind':'arrow','x':.2,'y':.15,'w':.55,'h':.7},{'kind':'arrow','x':.8,'y':.15,'w':-.6,'h':.7}]))
   links=review_shot(s)['rendered_arrow_connections'];self.assertEqual([(v['from_label'],v['to_label']) for v in links],[('left field','right hemisphere'),('right field','left hemisphere')])
- def test_unresolved_review_has_one_repair_and_no_paid_arbitration(self):
+ def test_unresolved_review_does_not_trigger_paid_repair_or_arbitration(self):
   from imagegen.script_analysis.errors import AnalysisError
   raw=data();part=copy.deepcopy(raw);part['shots']=part['shots'][:1]
   issue={'issues':[{'n':1,'code':'meaning','reason':'Needs correction','correction':'Repair just this shot'}]}
   c=Client([raw,issue,part,issue])
   with tempfile.TemporaryDirectory() as temp:
    with self.assertRaises(AnalysisError):stage({'characters':[],'scenes':[{'source_quote':STORY}]},STORY,client=c,cache=DiskCache(Path(temp)))
-   self.assertEqual(c.calls,4)
+   self.assertEqual(c.calls,2)
    draft=next(Path(temp).glob('science-v2-draft-*.json'));saved=json.loads(draft.read_text(encoding='utf-8'))
    self.assertEqual(len(saved['accepted_shots']),1)
 

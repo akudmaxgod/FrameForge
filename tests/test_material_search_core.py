@@ -222,6 +222,20 @@ class TestMaterialSearchCore(unittest.TestCase):
     # =========================================================================
     # Test 5: Candidate Ranking & Diversity
     # =========================================================================
+    def test_discovery_searches_video_scenes_without_unlocking_the_montage(self):
+        import copy
+        from imagegen.domain import DomainError
+        from imagegen.insert_coverage import ensure_unanimated
+        for clip in self.montage_doc['clips']:
+            clip.update(media_type='video',source_video_asset_id='existing-video')
+        before=copy.deepcopy(self.montage_doc)
+        with self.assertRaises(DomainError):self.service.create_plan('proj_123')
+        plan=self.service.create_plan('proj_123',options={'discovery_only':True})
+        self.assertEqual(plan['segments_count'],3)
+        self.assertEqual(set(plan['options']['protected_clip_ids']),{'clip_1','clip_2','clip_3'})
+        self.assertEqual(self.montage_doc,before)
+        with self.assertRaises(DomainError):ensure_unanimated(self.mock_service,'proj_123',self.montage_doc['clips'])
+
     def test_candidate_ranking_and_forbidden_filter(self):
         req = {
             "quote": "Стадо американских бизонов в Йеллоустоуне",

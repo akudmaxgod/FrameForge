@@ -123,9 +123,15 @@ class Application:
             owner=service.db.one('SELECT project_id FROM '+parts[1]+' WHERE id=?',(parts[2],))
             if owner:service.project(owner['project_id'])
         if method == 'GET' and path == '/api/editorial-capabilities':
-            return {'version': 2, 'scoped_scene_batches': True, 'park_unknown_flow_admission': True, 'application': 'FrameForge', 'release_version': '0.2.0rc6', 'bridge_version': '0.1.104'}
+            return {'version': 2, 'scoped_scene_batches': True, 'park_unknown_flow_admission': True, 'application': 'FrameForge', 'release_version': '0.2.0rc7', 'bridge_version': '0.1.105'}
         if method == 'GET' and path == '/api/session':
             return {'token': self.token}
+        if parts==['api','deepseek','approvals'] and method=='GET':
+            from .paid_pass_approval import gate
+            return {'requests':gate.pending(str(service.root.resolve()))}
+        if len(parts)==4 and parts[:3]==['api','deepseek','approvals'] and method=='POST':
+            from .paid_pass_approval import gate
+            return gate.decide(str(service.root.resolve()),parts[3],(data or {}).get('decision'))
         if method == 'GET' and path == '/api/settings':
             from .service import public_settings
             return public_settings(service.settings(), service.root)
@@ -938,7 +944,12 @@ class Application:
                     if type(target) is not int or not 1 <= target <= MAX_SCENES:
                         raise DomainError(f'Для автоматического анализа выберите 1–{MAX_SCENES} сцен.')
                     rebuild = bool((data or {}).get('rebuild'))
+                    resume=data.get('science_resume') is True
                     with service.db.transaction() as connection:
+                        if resume and (project.get('visual_format')!='science_atlas' or connection.execute(
+                            "SELECT 1 FROM generations WHERE project_id=? AND purpose='analysis' AND state NOT IN ('succeeded','failed','cancelled','resource_degraded') LIMIT 1",(project_id,)
+                        ).fetchone()):
+                            raise DomainError('Продолжение научного плана сейчас недоступно.',409)
                         if connection.execute("SELECT id FROM generations WHERE project_id=? AND purpose='analysis' AND state='waiting_review' LIMIT 1", (project_id,)).fetchone():
                             raise DomainError('Готовый разбор ожидает проверки. Отмените его перед новым анализом.', 409)
                         has_scenes = connection.execute('SELECT id FROM scenes WHERE project_id=? LIMIT 1', (project_id,)).fetchone()
@@ -960,9 +971,13 @@ class Application:
                         if project.get('visual_format')=='science_atlas':
                             from .science_plan_reuse import find
                             reuse=find(service,project)
+                            if resume and not reuse:
+                                last=connection.execute("SELECT snapshot FROM generations WHERE project_id=? AND purpose='analysis' AND state='failed' ORDER BY created_at DESC LIMIT 1",(project_id,)).fetchone()
+                                previous=json.loads(last['snapshot']) if last else {}
+                                if (previous.get('project') or {}).get('story')==project['story']:reuse=previous.get('pending_analysis')
                         generation_id = service.insert_generation(connection, project_id, 'analysis',
                             {'profile': settings, 'project': project, 'target': target, 'story_analyzer_version': 'deepseek',
-                             'analyzer_version': 'deepseek', 'analysis_rebuild': rebuild,**({'pending_analysis':reuse} if reuse else {})})
+                             'analyzer_version': 'deepseek', 'analysis_rebuild': rebuild,'science_resume':resume,**({'pending_analysis':reuse} if reuse else {})})
                     return {'generation_id': generation_id}
                 if action == 'batch':
                     return service.batch(project_id, data['idempotency_key'], data.get('scene_ids'))
@@ -1220,6 +1235,11 @@ def make_server(app, port=8765):
                     raise DomainError('Доступ с другого сайта запрещён.', 403)
                 parsed = urlparse(self.path)
                 path = parsed.path
+                if path.strip('/').split('/')[:3] == ['api', 'deepseek', 'approvals']:
+                    if origin and origin not in {'http://' + value for value in allowed}:
+                        raise DomainError('Подтверждение DeepSeek доступно только в интерфейсе FrameForge.', 403)
+                    if method == 'POST' and self.headers.get('X-Session-Token') != app.token:
+                        raise DomainError('Недействительная сессия. Перезагрузите страницу.', 403)
                 query_params = parse_qs(parsed.query)
                 data = {}
                 if method == 'POST' and path == '/api/shutdown':

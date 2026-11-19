@@ -437,9 +437,12 @@ class Worker:
                         'indeterminate': percent in (20, 60),
                     })
 
+                from .script_analysis.cache import DiskCache
                 analysis_result = deepseek_analyze(
                     story_text,
                     api_key=api_key,
+                    cache=DiskCache.for_data(self.service.root),
+                    cache_only=snapshot.get('science_resume') is True,
                     on_progress=report_progress,
                 )
 
@@ -456,6 +459,9 @@ class Worker:
                     mode=project.get('mode', 'cinematic'),
                     project=project, target=None if project.get('visual_format')=='science_atlas' else snapshot.get('target'),
                 )
+                snapshot['pending_analysis']=app_analysis
+                self.update(generation,snapshot=snapshot)
+                generation={**generation,'snapshot':snapshot}
                 self._save_analysis(generation, app_analysis, project['version'])
                 return
             if settings.get('image_backend') == 'google_nanobanana' and settings.get('google_api_key'):
@@ -545,6 +551,9 @@ class Worker:
                 if diag:
                     prog = {'stage': 'Сбой анализа сценария', 'percent': 0, 'diagnostics': diag}
                     self.update(generation, progress=prog)
+                science_review=getattr(error,'science_review',None)
+                if science_review:
+                    self.update(generation,progress={'stage':'Есть замечания к научному плану','science_review':science_review})
                 self.finish(generation, 'failed', str(error))
         except Exception as error:
             log.exception('Unexpected preparation error')
@@ -588,7 +597,13 @@ class Worker:
             else:
                 from .script_analysis.compact_staging import stage
             project = snapshot.get('project') or self.service.project(generation['project_id'])
+            from .script_analysis.cache import DiskCache
+            stage_options={'cache':DiskCache.for_data(self.service.root)}
+            if project.get('visual_format')=='science_atlas':
+                from .science_local_repair import LocalScienceReview
+                stage_options['local_review']=LocalScienceReview(self.service)
             analysis = stage(analysis, project.get('story') or self.service.project(generation['project_id'])['story'],
+                **stage_options,
                 api_key=settings.get('deepseek_api_key') or os.environ.get('DEEPSEEK_API_KEY'),
                 progress=lambda message, percent: self.update(generation,
                     progress={'stage': message, 'percent': percent}))

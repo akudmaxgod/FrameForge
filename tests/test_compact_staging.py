@@ -56,7 +56,7 @@ class CompactStagingTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             with self.assertRaises(AnalysisError):
                 stage(analysis, source, client=client, cache=DiskCache(Path(temp)))
-            self.assertEqual(list(Path(temp).glob('*.json')), [])
+            self.assertTrue(all(path.name.endswith('.draft.json') for path in Path(temp).glob('*.json')))
             self.assertNotIn('compact_staging', analysis['scenes'][0])
 
     def test_changed_source_invalidates_completed_plan(self):

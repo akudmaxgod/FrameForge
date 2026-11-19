@@ -152,8 +152,10 @@ class MaterialSearchPlanner:
         from ..insert_coverage import animated_scene_ids, is_animated
         animated = animated_scene_ids(self.service, project_id)
         clip_map = {c.get('edit_clip_id') or c.get('id'): c for c in clips}
-        raw_segments = [s for s in raw_segments if not any(
-            is_animated(clip_map[cid], animated) for cid in s.get('origin_clip_ids', []) if cid in clip_map)]
+        protected_ids = {cid for cid,c in clip_map.items() if is_animated(c, animated)}
+        if options.get('discovery_only') is not True:
+            raw_segments = [s for s in raw_segments if not any(
+                cid in protected_ids for cid in s.get('origin_clip_ids', []))]
         if not raw_segments:
             raise DomainError("Не найдено подходящих сегментов монтажа для выбранных сцен.", 400)
 
@@ -264,6 +266,7 @@ class MaterialSearchPlanner:
                     "quote": (c.get("prompt") or c.get("title") or "") if isinstance(c.get("prompt") or c.get("title"), str) else ""
                 }
         options_to_save = dict(options)
+        options_to_save['protected_clip_ids'] = sorted(protected_ids)
         options_to_save["voice_hash"] = voice_hash
         options_to_save["clip_signatures"] = clip_signatures
 

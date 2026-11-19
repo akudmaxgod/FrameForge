@@ -32,10 +32,13 @@ def policy(value=None):
     settings = {'mode': mode, 'percent': float(percent), 'distribution': distribution, 'photo_motion': photo_motion}
     if value.get('cover_photo_motion') is True:
         settings['cover_photo_motion'] = True
+    if value.get('cover_animated_sources') is True:
+        settings['cover_animated_sources'] = True
     return settings
 
 
 def animated_scene_ids(service, project_id, coverage=None):
+    if (coverage or {}).get('cover_animated_sources') is True:return set()
     if not (coverage or {}).get('cover_photo_motion'):
         return {r['id'] for r in service.db.all(
             'SELECT id FROM scenes WHERE project_id=? AND video_asset_id IS NOT NULL', (project_id,))}
@@ -47,15 +50,16 @@ def animated_scene_ids(service, project_id, coverage=None):
             if (json.loads(r['data']).get('animation') or {}).get('source') != 'ken_burns'}
 
 
-def is_animated(clip, scene_ids=(), *, cover_photo_motion=False):
+def is_animated(clip, scene_ids=(), *, cover_photo_motion=False,cover_animated_sources=False):
+    if cover_animated_sources:return False
     if (clip.get('source_kind') or 'scene') == 'footage':
         return False
     return bool(clip.get('source_video_asset_id') or clip.get('media_type') == 'video'
                 or clip.get('foreground_effect') or (clip.get('camera_motion') and not cover_photo_motion) or clip.get('scene_id') in scene_ids)
 
 
-def protected_reason(clip, scene_ids=(), *, cover_photo_motion=False):
-    if is_animated(clip, scene_ids, cover_photo_motion=cover_photo_motion):
+def protected_reason(clip, scene_ids=(), *, cover_photo_motion=False,cover_animated_sources=False):
+    if is_animated(clip, scene_ids, cover_photo_motion=cover_photo_motion,cover_animated_sources=cover_animated_sources):
         return 'animated'
     if clip.get('excluded'):
         return 'excluded'
@@ -69,7 +73,7 @@ def protected_reason(clip, scene_ids=(), *, cover_photo_motion=False):
 def ensure_unanimated(service, project_id, clips, coverage=None):
     settings = policy(coverage)
     scene_ids = animated_scene_ids(service, project_id, settings)
-    if any(is_animated(c, scene_ids, cover_photo_motion=settings.get('cover_photo_motion', False)) for c in clips):
+    if any(is_animated(c, scene_ids, cover_photo_motion=settings.get('cover_photo_motion', False),cover_animated_sources=settings.get('cover_animated_sources',False)) for c in clips):
         raise DomainError('Кадр уже анимирован. Автоматические вставки не могут закрывать готовую анимацию.', 409)
 
 
@@ -110,6 +114,7 @@ def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=(), 
     times = {c['edit_clip_id']: c for c in timeline['clips']}
     allowed = None if accepted_ids is None else set(accepted_ids)
     cover_photo_motion = settings.get('cover_photo_motion', False)
+    cover_animated_sources = settings.get('cover_animated_sources', False)
     candidates, skipped = [], {}
     seen = set()
     for proposal in proposals:
@@ -125,7 +130,7 @@ def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=(), 
             skipped[pid] = 'changed_segment'
             continue
         seen.add(pid)
-        reasons = (protected_reason(current[cid], scene_ids, cover_photo_motion=cover_photo_motion) for cid in ids)
+        reasons = (protected_reason(current[cid], scene_ids, cover_photo_motion=cover_photo_motion,cover_animated_sources=cover_animated_sources) for cid in ids)
         reason = next((reason for reason in reasons if reason), None)
         if reason:
             skipped[pid] = reason
@@ -181,7 +186,7 @@ def select(document, proposals, value=None, *, accepted_ids=None, scene_ids=(), 
                'existing_percent': round(100 * union_ms(existing) / total, 2) if total else 0,
                'target_percent': settings['percent'] if settings['mode'] == 'limited' else None,
                'selected_count': len(chosen), 'available_candidate_ms': available,
-               'animated_clips_protected': sum(is_animated(c, scene_ids, cover_photo_motion=cover_photo_motion) for c in current.values() if not c.get('excluded')),
+               'animated_clips_protected': sum(is_animated(c, scene_ids, cover_photo_motion=cover_photo_motion,cover_animated_sources=cover_animated_sources) for c in current.values() if not c.get('excluded')),
                'below_target': final + EPS < maximum,
                'already_above_target': union_ms(existing) > maximum + EPS}
     return {'selected_proposal_ids': [c['proposal']['proposal_id'] for c in chosen],

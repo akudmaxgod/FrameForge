@@ -435,6 +435,8 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
   // --- TAB 2: SCENARIO PANEL ---
   // Render Step 1: Scope & Provider Configuration
   const scopeBox = node('div', null, 'material-search-scope-box');
+  const scenarioStatus=node('p','','material-search-label');scenarioStatus.setAttribute('role','status');
+  const searchError=e=>{scenarioStatus.textContent='Поиск не выполнен: '+e.message;scenarioStatus.style.color='#fca5a5';notice(e.message,true);};
 
   const provGroup = node('div', null, 'material-search-controls-group');
   provGroup.append(node('span', 'Источники: ', 'material-search-label'));
@@ -469,20 +471,23 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
     try {
       planBtn.disabled = true;
       planBtn.textContent = 'Составление плана…';
+      scenarioStatus.textContent='Составляю поисковые запросы…';scenarioStatus.style.color='';
       const selectedProviders = Object.keys(providerCheckboxes).filter(k => providerCheckboxes[k].checked);
       if (!selectedProviders.length) {
         throw new Error('Выберите хотя бы один источник.');
       }
       const res = await api(`/projects/${projectId}/material-search/plans`, {
         options: {
+          discovery_only: true,
           universe_id: universeSelect.value,
           preferred_providers: selectedProviders
         }
       }, 'POST');
       currentPlan = res;
+      scenarioStatus.textContent='План готов. Поиск не изменяет монтаж; готовая анимация защищена от автоматической замены.';
       renderPlanSection();
     } catch (e) {
-      notice(e.message, true);
+      searchError(e);
     } finally {
       planBtn.disabled = false;
       planBtn.textContent = '📋 Составить план запросов';
@@ -495,19 +500,21 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
   }
   const pixabayAutoBtn = button('✨ Подобрать вставки Pixabay по сценарию', async () => {
     pixabayAutoBtn.disabled = true;
+    scenarioStatus.textContent='Подготавливаю поиск по проекту…';scenarioStatus.style.color='';
     try {
       currentPlan = await api(`/projects/${projectId}/material-search/plans`, {
-        options: { pixabay_scenario: true, pixabay_media_type: pixabayType.value, preferred_providers: ['pixabay'] }
+        options: { pixabay_scenario: true, discovery_only: true, pixabay_media_type: pixabayType.value, preferred_providers: ['pixabay'] }
       }, 'POST');
       renderPlanSection();
       const job = await api(`/projects/${projectId}/material-search/jobs`, { plan_id: currentPlan.plan_id, providers: ['pixabay'] }, 'POST');
       activeJobId = job.job_id || job.id;
       startJobPolling(activeJobId);
-    } catch (e) { notice(e.message, true); }
+      scenarioStatus.textContent='Поиск запущен. Результаты появятся ниже; монтаж не изменяется.';
+    } catch (e) { searchError(e); }
     finally { pixabayAutoBtn.disabled = false; }
   }, 'btn-sm primary');
   const pixabayInfo = node('p', 'До 4 тем сценария, до 8 поисковых запросов. Без DeepSeek. Результаты привязываются к фразам без повторов; скачивание — после выбора.', 'material-search-label');
-  scopeBox.append(pixabayAutoBtn, pixabayType, pixabayInfo, provGroup, universeGroup, planBtn);
+  scopeBox.append(pixabayAutoBtn, pixabayType, pixabayInfo, provGroup, universeGroup, planBtn,scenarioStatus);
   scenarioPanel.append(scopeBox);
 
   // Dynamic containers
@@ -619,7 +626,8 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
       card.append(qRow);
       reqsList.append(card);
     }
-    planSection.append(reqsList);
+    const queryDetails=node('details');queryDetails.open=!currentPlan.options?.pixabay_scenario;
+    queryDetails.append(node('summary',`Сегменты и запросы (${currentPlan.requirements?.length||0})`),reqsList);planSection.append(queryDetails);
 
     // Launch Search Button
     const launchBtn = button('🚀 Начать поиск и проверку материалов', async () => {
@@ -657,11 +665,11 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
           renderResults(candRes.candidates || []);
         } else if (job.state === 'failed' || job.state === 'cancelled') {
           clearInterval(pollTimer);
-          notice(`Задача поиска ${job.state === 'cancelled' ? 'отменена' : 'завершена с ошибкой: ' + (job.error_message || job.error || '')}`, true);
+          searchError(new Error(job.state==='cancelled'?'Расчёт отменён.':job.error_message||job.error||'Ошибка источника поиска.'));
         }
       } catch (e) {
         clearInterval(pollTimer);
-        notice(e.message, true);
+        searchError(e);
       }
     };
 
@@ -790,6 +798,11 @@ export async function openMaterialSearchModal({ projectId, api, notice, onDocume
             }
           }, 'btn-sm danger');
           actions.append(rollBtn);
+        } else if((req.origin_clip_ids||[]).some(id=>(currentPlan.options?.protected_clip_ids||[]).includes(id))) {
+          content.append(node('p','Исходная сцена — готовое видео или анимация. Автоматическая замена защищена.'));
+          const importBtn=button('Добавить в медиатеку',async()=>{
+            importBtn.disabled=true;try{await api(`/projects/${projectId}/material-search/candidates/${cand.id}/import`,{},'POST');importBtn.textContent='Добавлено в медиатеку';notice('Материал добавлен в медиатеку. Монтаж не изменён.');}catch(e){importBtn.disabled=false;searchError(e);}
+          },'btn-sm primary');actions.append(importBtn);
         } else {
           const applyBtn = button('✓ Применить к сцене', async () => {
             try {

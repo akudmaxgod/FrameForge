@@ -33,10 +33,34 @@ def atomic_json(path: Path, data: dict) -> None:
 
 class DiskCache:
     def __init__(self, directory: Path | None = None):
-        if directory is None:
-            self.directory = Path(__file__).resolve().parents[2] / ".script-analysis" / "cache"
-        else:
-            self.directory = Path(directory)
+        from ..release_paths import data_root
+        self.directory = Path(directory) if directory is not None else data_root() / ".script-analysis" / "cache"
+        self.legacy = Path(__file__).resolve().parents[2] / ".script-analysis" / "cache" if directory is None else None
+
+    @classmethod
+    def for_data(cls, root):
+        cache = cls(Path(root) / ".script-analysis" / "cache")
+        cache.legacy = cls().legacy
+        return cache
+
+    def read_path(self, path):
+        if not path.exists() and self.legacy:
+            old = self.legacy / path.name
+            if old.is_file():
+                return old
+        return path
+
+    def ensure_writable(self):
+        import tempfile
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=self.directory):
+                pass
+        except OSError as error:
+            raise AnalysisError(
+                f"Папка данных FrameForge недоступна для записи: {self.directory}. "
+                "Выберите доступную для записи папку данных. Подготовка остановлена до обращения к модели."
+            ) from error
 
     @contextmanager
     def lock(self, key: str, timeout: float = 600):
@@ -73,7 +97,7 @@ class DiskCache:
     def load(self, key: str) -> dict | None:
         path = self.directory / f"{key}.json"
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(self.read_path(path).read_text(encoding="utf-8"))
             if not isinstance(data, dict) or data.get("version") != VERSION or data.get("script_hash") != key:
                 log.warning("cache_incompatible script_hash=%s", key)
                 return None

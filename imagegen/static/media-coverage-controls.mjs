@@ -16,15 +16,17 @@ export function coverageControls(projectId,{onChange=()=>{}}={}){
  for(const [value,text] of [['spread','Распределить по ролику'],['best','Сначала лучшие совпадения']]){const o=element('option',text);o.value=value;distribution.append(o);}distribution.value=saved.distribution;
  const photoMotion=element('select');photoMotion.setAttribute('aria-label','Движение фото-вставок');
  for(const [value,text] of [['auto','Фото: чередовать движения'],['off','Фото: без движения'],['gentle_push_in','Фото: плавный наезд'],['gentle_pull_back','Фото: отдаление'],['gentle_pan_right','Фото: движение вправо'],['gentle_pan_left','Фото: движение влево']]){const o=element('option',text);o.value=value;photoMotion.append(o);}photoMotion.value=saved.photo_motion||'auto';
- function getValue(){const n=Number(percent.value);if(percent.value.trim()===''||!Number.isFinite(n)||n<0||n>100)throw Error('Укажите долю таймлайна от 0 до 100%.');return {mode:mode.value,percent:n,distribution:distribution.value,photo_motion:photoMotion.value};}
+ const coverAnimated=element('input');coverAnimated.type='checkbox';coverAnimated.checked=saved.cover_animated_sources===true;coverAnimated.setAttribute('aria-label','Разрешить вставки поверх готового видео');
+ const coverLabel=element('label');coverLabel.append(coverAnimated,document.createTextNode(' Разрешить вставки поверх готового видео · исходники сохраняются, доступен откат'));
+ function getValue(){const n=Number(percent.value);if(percent.value.trim()===''||!Number.isFinite(n)||n<0||n>100)throw Error('Укажите долю таймлайна от 0 до 100%.');return {mode:mode.value,percent:n,distribution:distribution.value,photo_motion:photoMotion.value,...(coverAnimated.checked?{cover_animated_sources:true}:{})};}
  function refresh(){amount.hidden=mode.value!=='limited';for(const b of presets)b.setAttribute('aria-pressed',String(Number(b.dataset.percent)===Number(percent.value)));}
  function changed(){refresh();try{localStorage.setItem(key,JSON.stringify(getValue()));}catch{}onChange();}
  for(const n of [20,30,40,50]){const b=element('button',n+'%');b.type='button';b.dataset.percent=n;b.onclick=()=>{percent.value=n;changed();};presets.push(b);amount.append(b);}
  amount.append(percent,element('span','%'));row.append(mode,amount,distribution,photoMotion);
  const help=element('p','Процент считается от длительности всего ролика, включая уже добавленные вставки. Только подходящие места и целые фразы; готовая анимация и движение камеры защищены.');help.className='media-coverage-help';
- root.append(row,help);refresh();mode.onchange=changed;percent.oninput=changed;distribution.onchange=changed;photoMotion.onchange=changed;
+ root.append(row,coverLabel,help);refresh();mode.onchange=changed;percent.oninput=changed;distribution.onchange=changed;photoMotion.onchange=changed;coverAnimated.onchange=changed;
  return {element:root,getValue,setDisabled(value){for(const e of root.querySelectorAll('input,select,button'))e.disabled=value;},
-  setValue(value){if(!value)return;mode.value=value.mode;percent.value=value.percent;distribution.value=value.distribution;photoMotion.value=value.photo_motion||'auto';refresh();}};
+  setValue(value){if(!value)return;mode.value=value.mode;percent.value=value.percent;distribution.value=value.distribution;photoMotion.value=value.photo_motion||'auto';coverAnimated.checked=value.cover_animated_sources===true;refresh();}};
 }
 
 export function coverageText(plan){

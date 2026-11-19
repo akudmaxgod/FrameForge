@@ -439,19 +439,21 @@ export async function openMediaMatchModal({ projectId, api, notice, onDocumentCh
         checkbox.checked=selectedProposalIds.has(id);
         const reason=res.skipped?.[id];
         if(['animated','locked','existing_footage','changed_segment','excluded','duplicate_material'].includes(reason))protectedSelections.add(id);
+        else protectedSelections.delete(id);
+        checkbox.disabled=protectedSelections.has(id)||checkbox.dataset.rejected==='true';
         if(protectedSelections.has(id)){checkbox.disabled=true;checkbox.title=reason==='duplicate_material'?'Этот материал уже выбран или использован в ролике.':reason==='animated'?'Готовая анимация защищена от вставок.':'Кадр защищён или уже содержит вставку.';}
       }
       coverageSummary.textContent=coverageText(res);previewReady=true;applyBtn.disabled=!selectedProposalIds.size;
     }catch(e){if(sequence===previewSequence){coverageSummary.textContent=e.message;notice(e.message,true);}}
   }
 
-  async function renderProposals(proposals) {
+  async function renderProposals(proposals,message) {
     list.innerHTML = '';
     selectedProposalIds.clear();
     checkboxes.clear();protectedSelections.clear();previewReady=false;
 
     if (!proposals || !proposals.length) {
-      list.innerHTML = '<div class="media-library-empty">Нет предложений вставок. Убедитесь, что материалы загружены и проанализированы через Qwen3-VL.</div>';
+      list.append(node('div',message||'Нет подходящих предложений. Проверьте анализ материалов и настройки защиты исходных сцен.','media-library-empty'));
       applyBtn.style.display = 'none';
       return;
     }
@@ -475,6 +477,7 @@ export async function openMediaMatchModal({ projectId, api, notice, onDocumentCh
       chk.type = 'checkbox';
       chk.checked = p.match_status === 'matched';
       chk.disabled=p.match_status==='rejected';
+      chk.dataset.rejected=String(p.match_status==='rejected');
       chk.setAttribute('aria-label','Вставка: '+p.phrase_quote);
       checkboxes.set(p.proposal_id,chk);
       chk.onchange = () => {
@@ -547,7 +550,7 @@ export async function openMediaMatchModal({ projectId, api, notice, onDocumentCh
     try {
       const res = await api(`/api/projects/${projectId}/edit/media-match`, { method: 'POST', body: { policy: 'balanced',coverage:coverage.getValue() } });
       currentProposalId = res.proposal_id;
-      await renderProposals(res.proposals);
+      await renderProposals(res.proposals,res.message);
       notice(`Найдено предложений вставок: ${res.total_proposals}`);
     } catch (e) {
       notice(e.message, true);

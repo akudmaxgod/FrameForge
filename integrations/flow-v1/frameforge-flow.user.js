@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name FrameForge Flow Bridge (new)
 // @namespace frameforge.local.bridge
-// @version 0.1.104
+// @version 0.1.105
 // @match https://flow.google.com/project/*
 // @match https://flow.google.com/u/*/project/*
 // @grant GM_xmlhttpRequest
@@ -452,6 +452,7 @@
   if(e.source!==peer||e.origin!==peerOrigin)return;
   if(!request){
    if(captureLateVideoResult(state,m)){save();tell('Поздний ответ на видеозапрос сохранён. Нажмите продолжение для проверки и загрузки в ФФ.');}
+   if(captureLateReferenceResult(state,m)){save();tell('Поздняя иллюстрация сохранена. Нажмите «ФФ: старт / продолжить», чтобы загрузить её без повторной генерации.');}
    return;
   }
   console.log('[FF Bridge] Received reply from custom tool:', m.type, m);
@@ -1114,6 +1115,14 @@
     const task=root.referenceTasks[key]||(root.referenceTasks[key]={job:null,result:null,error:null});
     return {local:requestState(root,task),task,key};
   }
+  function captureLateReferenceResult(root,message){
+    if(message.type!=='result'||typeof message.requestId!=='string')return false;
+    const task=Object.values(root?.referenceTasks||{}).find(t=>t.job?.kind==='props'&&t.job.requestId===message.requestId);
+    const result=message.result;
+    if(!task||task.result||result?.error||typeof result?.base64!=='string'||!result.base64||!/^image\/(png|jpeg|webp)$/.test(result.mimeType))return false;
+    task.result=result;task.error=null;
+    return true;
+  }
   async function processReferencePool(items,options) {
     const {state,save,tell,isPaused=()=>false}=options;
     const selected=items.filter(item=>!item.locked&&!state.done.includes(`props:${item.id}`));
@@ -1128,7 +1137,7 @@
           // A successful upload can be resumed without another provider request.
           if(task.result&&task.job){await options.uploadSavedFn(local);task.error=null;save();continue;}
           if(task.job&&!task.result&&!task.job.retryPending&&!['prepared','not_sent'].includes(task.job.submissionPhase)){
-            task.error='Исход отправленного запроса неизвестен. Повтор не отправлялся.';save();
+            task.error='Flow не подтвердил исход запроса. Проверьте готовую иллюстрацию в проекте Flow и подключение инструмента. Автоповтор отключён.';save();
             tell(`Иллюстрация ${item.name||item.id}: ожидается результат старого запроса; продолжаю остальные.`);continue;
           }
           task.error=null;active++;counted=true;save();
@@ -1877,7 +1886,7 @@
    const response=await api('POST','/api/bridge/v1/heartbeat',{
     project_id,flow_project_id:flowProject,
     adapter_connected:Boolean(peer),running,status:status.textContent,ack_command_id:ackCommandId,
-    adapter_instance_id:adapterInstanceId,script_version:'0.1.104',foreground_parallax:true,foreground_direct:true,scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
+    adapter_instance_id:adapterInstanceId,script_version:'0.1.105',foreground_parallax:true,foreground_direct:true,scoped_scene_start:true,reference_casting:true,character_casting:true,quota_admission:true,images_only:true,animations_only:true,animation_direction_refresh:true,animation_direction_contract:'image-motion/3',video_recovery:true,staged_image_batch:true,image_concurrency:adapterImageConcurrency,active_image_requests:[...pending.values()].filter(p=>p.type==='generate'&&p.jobKind!=='scene_video').length,claim_adapter:claimAdapter
    });
    const intent=GM_getValue(recoveryKey(flowProject),null);
    const recovery=recoveryAction({intent,running,
@@ -1948,7 +1957,7 @@
       scopeSavedWork,recoverVideoTasks,captureLateVideoResult,
       getFlowProjectId,recoveryAction,transientRecoveryError,
       sceneTaskState,
-      recoverSceneTasks,
+      recoverSceneTasks,captureLateReferenceResult,
       confirmedRemoteFailure,
       processScenePool,referenceTaskState,processReferencePool,
       ensureReferenceMediaId,
@@ -1968,7 +1977,7 @@
       scopeSavedWork,recoverVideoTasks,captureLateVideoResult,
       getFlowProjectId,recoveryAction,transientRecoveryError,
       sceneTaskState,
-      recoverSceneTasks,
+      recoverSceneTasks,captureLateReferenceResult,
       confirmedRemoteFailure,
       processScenePool,referenceTaskState,processReferencePool,
       ensureReferenceMediaId,

@@ -7,7 +7,6 @@ import json
 from pydantic import Field
 
 from .cache import DiskCache, atomic_json
-from .client import JsonClient
 from .errors import AnalysisError
 from .schemas import StrictModel
 from .stats import Stats
@@ -130,15 +129,18 @@ def stage(analysis, story, *, api_key=None, client=None, cache=None, progress=No
             path = cache.directory / ('staging-' + key + '.json')
             with cache.lock('staging-' + key):
                 plan = None
-                if path.is_file():
+                cached_path=cache.read_path(path)
+                if cached_path.is_file():
                     try:
-                        plan = validate(Staging.model_validate_json(path.read_text(encoding='utf-8')), batch, characters)
+                        plan = validate(Staging.model_validate_json(cached_path.read_text(encoding='utf-8')), batch, characters)
                         hits += 1
                     except (ValueError, AnalysisError):
                         plan = None
                 if plan is None:
-                    if client is None:
-                        client = JsonClient(api_key=api_key)
+                    # The two primary passes already contain a complete breakdown.
+                    # Optional narrative enrichment must not silently add a billable pass.
+                    if owned:
+                        return result
                     if progress:
                         progress(f'Постановка истории: кадры {start + 1}–{start + len(batch)}', 70)
                     draft_path = path.with_suffix('.draft.json')

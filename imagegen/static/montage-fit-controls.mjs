@@ -6,7 +6,7 @@ const seconds=ms=>(ms/1000).toFixed(2)+' с';
 export function mountVoiceFit(host,{id,api,flush,getState,accept,pause,notice,importedPrompts=false}){
  const panel=node('section');panel.className='montage-fit-preview';panel.hidden=true;host.append(panel);
  let job=null,timer,disposed=false,previewPlayer,semanticReview;
- const quick=button('По словам озвучки',async()=>{quick.disabled=true;try{await flush();pause();job=await api(`/projects/${id}/edit/voice-fit`,{expected_revision:getState().revision,timing_mode:'phrases',short_video_policy:'hold'});localStorage.setItem(key(id),job.id);await poll();}finally{quick.disabled=false;}});
+ const quick=button(importedPrompts?'Сопоставить сцены с озвучкой':'По словам озвучки',async()=>{quick.disabled=true;try{await flush();pause();job=await api(`/projects/${id}/edit/voice-fit`,{expected_revision:getState().revision,timing_mode:importedPrompts?'semantic':'phrases',short_video_policy:'hold'});localStorage.setItem(key(id),job.id);await poll();}finally{quick.disabled=false;}});
  function button(label,action){const b=node('button',label);b.type='button';b.onclick=()=>Promise.resolve().then(action).catch(e=>notice(e.message,true));return b;}
  const select=node('select');select.setAttribute('aria-label','Если видео короче фразы');
  const mode=node('select');mode.setAttribute('aria-label','Способ подгонки к озвучке');
@@ -36,6 +36,12 @@ export function mountVoiceFit(host,{id,api,flush,getState,accept,pause,notice,im
    }));return;
   }
   if(job.status==='rolled_back'){panel.append(node('p','Монтаж возвращён к варианту до подгонки.'));return;}
+  const invalidQuotes=['words','phrases'].includes(job.timing_mode)&&proposal.conflicts.some(x=>['unbound_quote','unbound_footage','empty_phrase','source_coverage','manual_order'].includes(x.code));
+  if(invalidQuotes){
+   const missing=proposal.conflicts.filter(x=>['unbound_quote','unbound_footage'].includes(x.code)).length;
+   panel.append(node('p','Подгонка не рассчитана: '+(missing?`у ${missing} клипов нет точных цитат сценария.`:'привязки клипов пропускают или повторяют текст сценария.')),node('p','Для готовых визуальных промптов используйте смысловое сопоставление с озвучкой. Промпты и сохранённый монтаж останутся без изменений до применения проверенного варианта.'),button('Пересчитать по смыслу',()=>{mode.value='semantic';mode.onchange();start.click();}));
+   return;
+  }
   for(const issue of proposal.conflicts.filter(x=>!semantic||x.code!=='semantic_review')){const p=node('p',issue.message);p.className='montage-warning';panel.append(p);}
   for(const warning of proposal.warnings)panel.append(node('p',warning.message));
   if(condense){

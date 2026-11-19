@@ -3,6 +3,12 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
+
+# The application launches this file directly in an isolated Python process.
+# A script's directory is imagegen/, so explicitly expose its package parent.
+if not __package__:
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 def write(path,data):
     temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(data,ensure_ascii=False),encoding='utf-8');temporary.replace(path)

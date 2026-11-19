@@ -81,6 +81,19 @@ def repair_word_timings(alignment):
     return result
 
 
+def unbound_phrase_clips(snap):
+    scenes={s['id']:s for s in snap['scenes']};story=snap['story'];missing=[]
+    for clip in snap['document']['clips']:
+        if clip.get('excluded'):continue
+        data=scenes.get(clip.get('scene_id'),{}).get('data',{})
+        proof=clip.get('voice_source_binding') or {k:data.get('source_'+k) for k in ('start','end','quote')}
+        a,b=proof.get('start'),proof.get('end')
+        if (clip.get('source_kind')=='footage' and not clip.get('voice_source_binding') or
+                type(a) is not int or type(b) is not int or not 0<=a<b<=len(story) or story[a:b]!=proof.get('quote')):
+            missing.append(clip['edit_clip_id'])
+    return missing
+
+
 def propose(snap,alignment,policy='hold',*,repair=False):
     """Pure calculation: exact quote coverage, one boundary clock, explicit conflicts."""
     if policy not in ('hold','speed','error','retime'):raise DomainError('Выберите правило для короткого видео.')
@@ -134,6 +147,10 @@ def propose(snap,alignment,policy='hold',*,repair=False):
     for left,right in zip(spans,spans[1:]):
         if left and right and left['end']>right['start']:
             conflict('manual_order','Порядок или перекрытие цитат не соответствует речи. Порядок клипов сохранён.')
+    if any(item['code'] in ('unbound_quote','unbound_footage','empty_phrase','source_coverage','manual_order','no_clips') for item in conflicts):
+        return {'version':VERSION,'document':doc,'changes':[],'conflicts':conflicts,'warnings':warnings,
+                'can_apply':False,'preview_available':False,'timeline':normalize(doc),'boundaries_ms':[],
+                'timing_accuracy_measured':False,'short_video_policy':policy}
     boundaries=[0.0]
     for index,selected in enumerate(ranges):
         cid=active[index]['edit_clip_id']
@@ -383,6 +400,12 @@ class MontageVoiceFit:
         if isinstance(metadata,str):metadata=json.loads(metadata)
         mode=data.get('timing_mode') or ('duration_freeze' if metadata.get('prompt_import') else 'phrases')
         if mode not in ('auto','words','phrases','duration_freeze','semantic','condense'):raise DomainError('Неизвестный способ подгонки.')
+        if mode in ('words','phrases'):
+            missing=unbound_phrase_clips(snap)
+            if missing:
+                error=DomainError(f'Подгонка по словам требует точных цитат сценария. Без привязки: {len(missing)} клипов. Для визуальных промптов выберите «По смыслу · готовые промпты и речь».',409)
+                error.details={'code':'PHRASE_BINDING_REQUIRED','unbound_clips':len(missing),'suggested_mode':'semantic'}
+                raise error
         if mode=='condense':
             from .montage_condense import prepare
             prepare(snap,data.get('keep_clip_ids'))

@@ -641,6 +641,7 @@ class MediaMatching:
         coverage = coverage_policy(opts.get('coverage'))
         animated = animated_scene_ids(self.service, project_id, coverage)
         cover_photo_motion = coverage.get('cover_photo_motion', False)
+        cover_animated_sources = coverage.get('cover_animated_sources', False)
 
         # 1. Get current montage edit and normalized timeline
         edit = self.service.editing.get(project_id)
@@ -699,9 +700,12 @@ class MediaMatching:
         base_clips = {c['edit_clip_id']: c for c in doc['clips']}
         eligible = [
             clip for clip in logical_segments(doc, timeline)
-            if not any(protected_reason(base_clips[cid], animated, cover_photo_motion=cover_photo_motion)
+            if not any(protected_reason(base_clips[cid], animated, cover_photo_motion=cover_photo_motion,cover_animated_sources=cover_animated_sources)
                        for cid in clip['replace_clip_ids'])
         ]
+        if not eligible:
+            return {'project_id':project_id,'base_edit_revision':base_revision,'proposals':[],'total_proposals':0,
+                    'message':'Материалы проанализированы, но все интервалы защищены. Если вставки должны закрывать готовое видео, включите «Разрешить вставки поверх готового видео» и пересчитайте подбор. Ручные фиксации и существующие вставки остаются защищены.'}
         self._report(project_id, total=len(eligible))
         confirmed = verification_errors = processed = 0
         media_index, term_weights = description_index(segments) if quick else ([], {})

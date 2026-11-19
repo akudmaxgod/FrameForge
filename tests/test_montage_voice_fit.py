@@ -37,6 +37,25 @@ def pure_fixture():
 
 
 class CalculationTests(unittest.TestCase):
+    def test_missing_quotes_never_expand_one_clip_over_the_entire_recording(self):
+        from imagegen.montage_voice_fit import unbound_phrase_clips
+        snap,alignment=pure_fixture()
+        for scene in snap['scenes'][:-1]:
+            for key in ('source_start','source_end','source_quote'):scene['data'].pop(key,None)
+        before=copy.deepcopy(snap['document']);result=propose(snap,alignment,repair=True)
+        self.assertEqual(len(unbound_phrase_clips(snap)),2)
+        self.assertFalse(result['can_apply']);self.assertFalse(result['preview_available']);self.assertEqual(result['changes'],[]);self.assertEqual(result['boundaries_ms'],[]);self.assertEqual(result['document'],before)
+
+    def test_unbound_phrase_request_is_rejected_before_starting_recognition(self):
+        from unittest.mock import Mock
+        from imagegen.montage_voice_fit import MontageVoiceFit
+        snap,_=pure_fixture();snap['scenes'][0]['data'].pop('source_start')
+        service=Mock();service.root=Path(tempfile.gettempdir());service.editing.get.return_value={'revision':1};service.project.return_value={'analysis_metadata':{'prompt_import':{}}}
+        worker=MontageVoiceFit(service)
+        with patch('imagegen.montage_voice_fit.snapshot',return_value=snap),patch('imagegen.montage_voice_fit.threading.Thread') as thread:
+            with self.assertRaises(DomainError) as caught:worker.start('pid',{'expected_revision':1,'timing_mode':'phrases'})
+            self.assertEqual(caught.exception.details,{'code':'PHRASE_BINDING_REQUIRED','unbound_clips':1,'suggested_mode':'semantic'});thread.assert_not_called()
+
     def test_phrase_boundaries_pauses_tail_and_no_input_mutation(self):
         snap,alignment=pure_fixture();before=copy.deepcopy(snap);result=propose(snap,alignment)
         self.assertEqual(snap,before);self.assertTrue(result['can_apply'],result['conflicts'])

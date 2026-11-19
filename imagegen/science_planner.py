@@ -216,19 +216,24 @@ def normalize_relations(plan,registry=None,frames=None,known=None):
         # A reference key is immutable. The reviewer sees its actual saved description,
         # and must request a NEW key if a different picture is needed.
         plan.assets=[known.get(asset.key,asset).model_copy(deep=True) for asset in plan.assets]
+    from .science_local_repair import repair_contract
+    plan=repair_contract(plan,known)
     needed={key for shot in plan.shots for key in shot.asset_keys+([shot.support_asset_key] if shot.support_asset_key else [])}
     plan.assets=[asset for asset in plan.assets if asset.key in needed]
     return plan
 
 def errors(plan, frames, known, registry,*,visual_first=True):
+    from .science_local_repair import overlay_request
     found=[];merged=dict(known)
     def bad(n,reason):found.append({'n':n,'reason':reason})
     if [s.n for s in plan.shots]!=[f['n'] for f in frames]:bad(0,'Сохрани все входные n ровно один раз по порядку.')
     if len({a.key for a in plan.assets})!=len(plan.assets):bad(0,'Ключи assets повторяются.')
     for a in plan.assets:
         if a.key in merged and merged[a.key]!=a:bad(0,'Изменён известный asset '+a.key)
-        clean=re.sub(r'без\s+(?:текста|подписей|стрелок|надписей|цифр)', '',a.subject,flags=re.I)
-        if re.search(r'график|стрелк|строк[аиу].{0,35}(?:текст|слов)|призыв\s+(?:поставить|подпис)',clean,re.I):bad(0,'Типографику, график и стрелки вынеси в elements: '+a.key)
+        if overlay_request(a.subject):
+            for shot in plan.shots:
+                if a.key in shot.asset_keys or a.key==shot.support_asset_key:
+                    bad(shot.n,'График, текст и поясняющие стрелки должны рисоваться отдельно от иллюстрации: '+a.key)
         merged[a.key]=a
     lookup={f['n']:f for f in frames}
     for s in plan.shots:
@@ -305,7 +310,7 @@ def review_shot(shot):
         'start':[e.x,e.y],'end':[e.x+e.w,e.y+e.h]} for e in shot.elements if e.kind=='arrow']
     return value
 
-def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None):
+def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None,local_review=None):
     from .science_atlas import VERSION,asset_name
     schema_text='\nJSON schema (все имена полей и значения enum обязательны): '+json.dumps(Plan.model_json_schema(),ensure_ascii=False)
     review_schema='\nВерни JSON строго по схеме: '+json.dumps(Review.model_json_schema(),ensure_ascii=False)
@@ -320,16 +325,17 @@ def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None):
     signature=hashlib.sha256((PLANNER_VERSION+PROMPT+signature_schema+REVIEW_PROMPT+review_schema+story+json.dumps(list(registry),ensure_ascii=False)).encode()).hexdigest()
     previous=analysis.get('diagnostics',{}).get('science_atlas',{})
     if previous.get('complete') and previous.get('source_key')==signature:return analysis
-    cache=cache or DiskCache();owned=client is None;stats=Stats();catalog={};shots=[];audits=[];hits=0
+    cache=cache or DiskCache();cache.ensure_writable();owned=client is None;stats=Stats();catalog={};shots=[];audits=[];hits=0
     previous_assets={a['key']:Asset.model_validate(a) for a in previous.get('assets',[])}
-    catalog=dict(previous_assets)
+    catalog=dict(previous_assets);cached_recovery=False
     try:
         for start in range(0,len(frames),BATCH_SIZE):
             batch=frames[start:start+BATCH_SIZE]
             key=hashlib.sha256((signature+json.dumps([batch,[a.model_dump() for a in catalog.values()]],ensure_ascii=False)).encode()).hexdigest()
             path=cache.directory/('science-v2-'+key+'.json');plan=None;audit_start=len(audits)
-            if path.is_file():
-                saved=json.loads(path.read_text(encoding='utf-8'))
+            read_path=cache.read_path(path)
+            if read_path.is_file():
+                saved=json.loads(read_path.read_text(encoding='utf-8'))
                 candidate=normalize_relations(Plan.model_validate(saved['plan']),registry,batch,catalog);problems,merged=errors(candidate,batch,catalog,registry)
                 if not problems and saved.get('reviewed') is True:
                     plan=candidate;hits+=1;audits.extend(saved.get('review_evidence') or [{'first':batch[0]['n'],'last':batch[-1]['n'],'cache_verified':True}])
@@ -341,8 +347,10 @@ def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None):
                 'recent_shots':[{'layout':s.layout,'focus':s.focus} for s in shots[-6:]]}
             draft=cache.directory/('science-v2-draft-'+key+'.json')
             accepted={};working=dict(catalog);proposed={};resume_candidate=None
-            if draft.is_file():
-                partial=json.loads(draft.read_text(encoding='utf-8'))
+            draft_read=cache.read_path(draft)
+            if draft_read.is_file():
+                cached_recovery=True
+                partial=json.loads(draft_read.read_text(encoding='utf-8'))
                 proposed={v['key']:Asset.model_validate(v) for v in partial['plan'].get('assets',[])}
                 payload['previous_plan']=partial['plan'];payload['fix_required']=partial['issues']
                 if partial.get('accepted_reviewed'):
@@ -351,18 +359,44 @@ def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None):
                 resume_candidate=normalize_relations(Plan.model_validate(partial['plan']),registry,batch,working)
             if plan is None:
                 last_seen={s.n:s for s in (resume_candidate.shots if resume_candidate else [])}
-                for attempt in range(2):
+                can_generate_locally=local_review is not None and hasattr(local_review,'generate_plan')
+                for attempt in range(2 if can_generate_locally else 1):
                     remaining=[f for f in batch if f['n'] not in accepted]
                     if not remaining:break
                     payload['frames']=remaining;payload['known_assets']=[a.model_dump() for a in {**proposed,**working}.values()]
-                    if client is None:client=JsonClient(api_key=api_key)
                     if progress:progress(f'Научпоп: постановка {remaining[0]["n"]}–{remaining[-1]["n"]}; принято {len(accepted)}/{len(batch)}',72)
                     candidate=None
                     if attempt==0 and resume_candidate is not None:
                         filtered=Plan(assets=resume_candidate.assets,shots=[s for s in resume_candidate.shots if s.n in {f['n'] for f in remaining}])
                         candidate=normalize_relations(filtered,registry,remaining,working)
                     if candidate is None:
-                        candidate=client.ask_json([{'role':'system','content':PROMPT+schema_text},{'role':'user','content':json.dumps(payload,ensure_ascii=False,separators=(',',':'))}],Plan,stats,phase='C',script_hash=key)
+                        if can_generate_locally:
+                            paid_messages=[{'role':'system','content':PROMPT+schema_text},{'role':'user','content':json.dumps(payload,ensure_ascii=False,separators=(',',':'))}]
+                            permit=None
+                            if attempt==0 and hasattr(local_review,'authorize_extra_pass') and not getattr(local_review,'prefer_local',False):
+                                if progress:progress('Дополнительный платный проход ожидает подтверждения. Через 60 секунд продолжит Qwen.',72)
+                                permit=local_review.authorize_extra_pass(paid_messages,Plan,key)
+                            if permit is not None:
+                                paid_client=None
+                                try:
+                                    paid_client=JsonClient(api_key=api_key,authorization=permit,failed_dir=cache.directory.parent/'failures')
+                                    candidate=paid_client.ask_json(paid_messages,Plan,stats,phase='C',script_hash=key)
+                                except AnalysisError:
+                                    local_review.prefer_local=True
+                                finally:
+                                    if paid_client is not None:paid_client.close()
+                            if candidate is None:
+                                if progress:progress(f'Локальная Qwen: постановка {remaining[0]["n"]}–{remaining[-1]["n"]}; без DeepSeek',72)
+                                try:candidate=local_review.generate_plan(payload,Plan)
+                                except AnalysisError as error:
+                                    if hasattr(error,'science_review'):
+                                        saved=error.science_review.pop('saved_in_batch',0)
+                                        error.science_review.update(accepted=start+len(accepted)+saved,total=len(frames))
+                                    raise
+                        else:
+                            if cached_recovery:raise AnalysisError('Восстановление остановлено без дополнительных запросов DeepSeek: для следующего фрагмента нет сохранённого плана. Проверенные сцены и локальные исправления сохранены.')
+                            if client is None:raise AnalysisError('Для научной постановки нужна локальная Qwen. DeepSeek ограничен двумя проходами разбора; дополнительный запрос заблокирован.')
+                            candidate=client.ask_json([{'role':'system','content':PROMPT+schema_text},{'role':'user','content':json.dumps(payload,ensure_ascii=False,separators=(',',':'))}],Plan,stats,phase='C',script_hash=key)
                     candidate=normalize_relations(candidate,registry,remaining,working)
                     proposed.update({a.key:a for a in candidate.assets if a.key not in working})
                     available={**proposed,**working}
@@ -372,9 +406,13 @@ def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None):
                     bad={p['n'] for p in problems};global_error=0 in bad
                     good_frames=[] if global_error else [f for f in remaining if f['n'] not in bad]
                     good_shots=[s for s in candidate.shots if s.n in {f['n'] for f in good_frames}]
-                    if good_frames:
+                    if good_frames and not getattr(candidate,'_locally_reviewed',False):
+                        review_client=client
+                        if resume_candidate is not None or local_review is not None:
+                            if local_review is None:raise AnalysisError('Сохранённый план исправлен локально. Для повторной проверки подключите локальную Qwen. Дополнительные запросы DeepSeek заблокированы.')
+                            review_client=local_review
                         if progress:progress(f'Научпоп: проверка смысла {good_frames[0]["n"]}–{good_frames[-1]["n"]}',78)
-                        review=client.ask_json([{'role':'system','content':REVIEW_PROMPT+review_schema},{'role':'user','content':json.dumps({'renderer_architecture':{'native_experiments':'Строка с настоящими читаемыми словами из elements, например ДОМ РЕКА ЛЕС МОСТ, является ПОЛНОЦЕННОЙ СТРОКОЙ опыта чтения. Это правильный локальный объект, НЕ дублирование narration. Не заменяй его Flow-asset с буквами: генерация букв в assets запрещена. Метки креста и точки также намеренно локальные. Изображать физическое закрытие глаза на экране необязательно, если зрителю даётся короткая команда выполнить это самому. Не требуй числовой шкалы реальных сантиметров на экране.','illustrative_scope':'Условная иллюстрация метода или типичного объекта допустима, если она не выдаётся за историческое фото, конкретную запись измерений или новый научный факт. Не требуй, чтобы narration буквально перечисляла чашку/прибор/позу, если это нейтральная иллюстративная обстановка. Не требуй доказать каждое озвученное слово на одном изображении: кадр может сопровождать часть мысли, если не противоречит остальному.','allowed_functions':['structure','mechanism','factors','comparison','instruction','analogy','observation','summary','transition'],'visual_first':'Визуал занимает кадр. headline/caption/focus — скрытые редакторские поля. Весь narration уже звучит: НЕ требуй повторить его текстом, в том числе в подписях сравнения.','comparison':'layout=comparison ГАРАНТИРУЕТ две картинки одновременно бок о бок; labels под каждой. Пустой elements корректен и не препятствует сравнению.','local_elements':'elements, nodes и edges рисуются КОДОМ локально. Flow получает ТОЛЬКО assets.subject/view/state. Текст, точки, стрелки и схемы в elements НЕ требуют от Flow ничего и являются правильным форматом.','process':'Схематичный process намеренно имеет 0 assets: nodes/edges уже являются его визуальным носителем. Не требуй буквальную фотографию для схемы.','capacity':'Максимум 2 иллюстрации. Не предлагай три изображения для одного кадра.','review_standard':'Ищи смысловые противоречия и невыполнимые задания. Не требуй показать измерение/доказательство каждого факта, если он уже дан исходным текстом: число можно написать в подписи, а орган показать без семи отдельных меток. Не отмечай допустимый синоним как изменение уверенности без конкретной разницы значения. Статичное пояснение и условная схема допустимы; выдуманные данные под видом измеренных — нет.'},'context':story[max(0,good_frames[0]['source_start']-900):min(len(story),good_frames[-1]['source_end']+900)],'frames':good_frames,'shots':[review_shot(s) for s in good_shots],'assets':[a.model_dump() for key,a in merged.items() if key in {k for shot in good_shots for k in shot.asset_keys+([shot.support_asset_key] if shot.support_asset_key else [])}]},ensure_ascii=False)}],Review,stats,phase='C',script_hash=key+'-review')
+                        review=review_client.ask_json([{'role':'system','content':REVIEW_PROMPT+review_schema},{'role':'user','content':json.dumps({'renderer_architecture':{'native_experiments':'Строка с настоящими читаемыми словами из elements, например ДОМ РЕКА ЛЕС МОСТ, является ПОЛНОЦЕННОЙ СТРОКОЙ опыта чтения. Это правильный локальный объект, НЕ дублирование narration. Не заменяй его Flow-asset с буквами: генерация букв в assets запрещена. Метки креста и точки также намеренно локальные. Изображать физическое закрытие глаза на экране необязательно, если зрителю даётся короткая команда выполнить это самому. Не требуй числовой шкалы реальных сантиметров на экране.','illustrative_scope':'Условная иллюстрация метода или типичного объекта допустима, если она не выдаётся за историческое фото, конкретную запись измерений или новый научный факт. Не требуй, чтобы narration буквально перечисляла чашку/прибор/позу, если это нейтральная иллюстративная обстановка. Не требуй доказать каждое озвученное слово на одном изображении: кадр может сопровождать часть мысли, если не противоречит остальному.','allowed_functions':['structure','mechanism','factors','comparison','instruction','analogy','observation','summary','transition'],'visual_first':'Визуал занимает кадр. headline/caption/focus — скрытые редакторские поля. Весь narration уже звучит: НЕ требуй повторить его текстом, в том числе в подписях сравнения.','comparison':'layout=comparison ГАРАНТИРУЕТ две картинки одновременно бок о бок; labels под каждой. Пустой elements корректен и не препятствует сравнению.','local_elements':'elements, nodes и edges рисуются КОДОМ локально. Flow получает ТОЛЬКО assets.subject/view/state. Текст, точки, стрелки и схемы в elements НЕ требуют от Flow ничего и являются правильным форматом.','process':'Схематичный process намеренно имеет 0 assets: nodes/edges уже являются его визуальным носителем. Не требуй буквальную фотографию для схемы.','capacity':'Максимум 2 иллюстрации. Не предлагай три изображения для одного кадра.','review_standard':'Ищи смысловые противоречия и невыполнимые задания. Не требуй показать измерение/доказательство каждого факта, если он уже дан исходным текстом: число можно написать в подписи, а орган показать без семи отдельных меток. Не отмечай допустимый синоним как изменение уверенности без конкретной разницы значения. Статичное пояснение и условная схема допустимы; выдуманные данные под видом измеренных — нет.'},'context':story[max(0,good_frames[0]['source_start']-900):min(len(story),good_frames[-1]['source_end']+900)],'frames':good_frames,'shots':[review_shot(s) for s in good_shots],'assets':[a.model_dump() for key,a in merged.items() if key in {k for shot in good_shots for k in shot.asset_keys+([shot.support_asset_key] if shot.support_asset_key else [])}]},ensure_ascii=False)}],Review,stats,phase='C',script_hash=key+'-review')
                         if any(i.n not in {f['n'] for f in good_frames} for i in review.issues):
                             problems.append({'n':0,'reason':'Редактор вернул неизвестный n.'});global_error=True
                         problems.extend(i.model_dump() for i in review.issues)
@@ -389,10 +427,13 @@ def stage(analysis,story,*,api_key=None,client=None,cache=None,progress=None):
                     draft_plan={'assets':[v.model_dump() for v in all_assets.values()],'shots':[last_seen[f['n']].model_dump() for f in batch if f['n'] in last_seen]}
                     cache.directory.mkdir(parents=True,exist_ok=True)
                     atomic_json(draft,{'plan':draft_plan,'issues':problems,'accepted_reviewed':True,'accepted_shots':[v.model_dump() for v in accepted.values()],'accepted_assets':[v.model_dump() for v in working.values()]})
-                    audits.append({'first':remaining[0]['n'],'last':remaining[-1]['n'],'attempt':attempt+1,'issues':problems})
+                    audits.append({'first':remaining[0]['n'],'last':remaining[-1]['n'],'attempt':attempt+1,'issues':problems,'review_engine':'local_qwen' if local_review is not None else 'deepseek','paid_repair_attempts':0})
                     if progress and problems:progress('Уточняю: '+json.dumps(problems,ensure_ascii=False)[:1200],78)
                     payload['previous_plan']={'assets':[a.model_dump() for a in candidate.assets],'shots':[s.model_dump() for s in candidate.shots if s.n not in accepted]};payload['fix_required']=problems
-                if len(accepted)!=len(batch):raise AnalysisError('Научная постановка требует исправления: '+json.dumps(problems,ensure_ascii=False)[:1800]+'. Проверенные сцены сохранены; прежний проект не заменён.')
+                if len(accepted)!=len(batch):
+                    error=AnalysisError(f'Принято и сохранено {start+len(accepted)} из {len(frames)} сцен. Проверьте замечания к оставшимся сценам.')
+                    error.science_review={'accepted':start+len(accepted),'total':len(frames),'issues':problems}
+                    raise error
                 plan=Plan(assets=list(working.values()),shots=[accepted[f['n']] for f in batch]);merged=working
                 path.parent.mkdir(parents=True,exist_ok=True);atomic_json(path,{'reviewed':True,'plan':plan.model_dump(),'review_evidence':audits[audit_start:]})
             catalog=merged;shots.extend(plan.shots)

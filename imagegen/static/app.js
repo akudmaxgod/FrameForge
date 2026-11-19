@@ -12,6 +12,7 @@ import {analysisError,analysisReviewState} from './analysis-error.mjs';
 import {openPromptImport,editImportedPrompt,formatImportTime} from './prompt-import.mjs';
 import {makeProjectActivation} from './project-selection.mjs';
 import {openProjectManager} from './project-manager.mjs';
+import {watchPaidPassApprovals} from './deepseek-approval.mjs';
 const activateProject=makeProjectActivation(api);
 let montageView=null,montageProjectId=null,montageRenderId=0,montageReady=null;
 let fullScienceStarting=false;
@@ -1045,15 +1046,26 @@ function renderAnalysisState(){
     if(isActiveGeneration(generation))line.append(el('span',undefined,'pulse'));
     const backendUsed=generation.snapshot?.profile?.text_backend||'deepseek';
     const backendLabel=backendUsed==='deepseek'?'DeepSeek V4.1 Flash':(backendUsed==='nvidia'?'NVIDIA Nemotron':backendUsed==='hybrid'?'Гибрид':'Локальная модель Qwen');
-    line.append(el('strong',`${labels[generation.state]||generation.state} (${backendLabel})`));
+    const scienceReview=generation.progress?.science_review;
+    line.append(el('strong',scienceReview?'Есть спорные сцены':`${labels[generation.state]||generation.state} (${backendLabel})`));
     box.append(line);
     if(isActiveGeneration(generation))box.append(progressMeter(generation));
-    if(generation.error){
+    if(scienceReview){
+      if(Number.isInteger(scienceReview.accepted))box.append(el('p',`Принято и сохранено ${scienceReview.accepted} из ${scienceReview.total} сцен.`));
+      const details=el('details'),list=el('ul');details.open=true;
+      details.append(el('summary',`Замечания (${scienceReview.issues.length})`));
+      for(const issue of scienceReview.issues){const row=el('li');row.append(el('strong',issue.n?`Сцена ${issue.n}`:'План иллюстраций'),el('p',issue.reason));if(issue.correction)row.append(el('p',issue.correction,'muted'));list.append(row);}
+      details.append(list);box.append(details);
+    }else if(generation.error){
       const failure=analysisError(generation.error);
       if(failure){
         box.append(el('p',failure.text,'error'),el('p',failure.help,'muted'));
         const details=el('details');details.append(el('summary','Подробности ошибки'),el('p',failure.details));box.append(details);
       }else box.append(el('p',generation.error,'error'));
+    }
+    if(generation.state==='failed'&&project.visual_format==='science_atlas'&&!project.scenes.length&&
+       (scienceReview||/Научная постановка требует исправления|Восстановление остановлено|Локальная Qwen|Папка данных FrameForge/i.test(generation.error||''))){
+      box.append(button('Продолжить сохранённый план',()=>action(`/projects/${current}/analyse`,{target:draftTarget,science_resume:true},'Продолжение поставлено в очередь'),'primary'));
     }
   }
   main.append(box);
@@ -3705,5 +3717,6 @@ try{
   render();
 }catch(error){showNotice(error.message,true);}
 setInterval(()=>{if(currentSettings?.image_backend==='flow')void refreshFlowBridgeStatus();},3500);
+watchPaidPassApprovals(api);
 setInterval(()=>{const watching=current&&animationRunFor(current)&&!animationRunFor(current).finished;if(current&&!dialog.open&&(watching||!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)))refresh().catch(error=>showNotice('Не удалось обновить: '+error.message,true));},2500);
 

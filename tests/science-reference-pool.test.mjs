@@ -39,6 +39,17 @@ test('an uncertain submitted job is parked instead of submitted again',async()=>
  assert.equal(h.state.referenceTasks['props:p0:1'].job.requestId,'old');
 });
 
+test('late reference result is correlated by request id and uploaded without a new generation',async()=>{
+ const h=harness();const {task}=h.bridge.referenceTaskState(h.state,h.items[0]);
+ task.job={id:'p0',kind:'props',requestId:'saved-request',submissionPhase:'sent'};
+ const reply={type:'result',requestId:'saved-request',result:{mediaId:'media-p0',base64:'bytes-p0',mimeType:'image/png'}};
+ assert.equal(h.bridge.captureLateReferenceResult(h.state,{...reply,requestId:'unrelated'}),false);
+ assert.equal(h.bridge.captureLateReferenceResult(h.state,reply),true);
+ assert.equal(h.bridge.captureLateReferenceResult(h.state,reply),false);
+ await h.bridge.processReferencePool(h.items.slice(0,1),h.options);
+ assert.deepEqual(h.started,[]);assert.deepEqual(h.saved,['p0']);
+});
+
 test('scientific queue dispatches the reference pool and skips importing completed atlas materials',async()=>{
  const h=harness();h.items[0].locked=true;h.options.api=async(method,path)=>path.includes('/prompts')?{props:h.items,characters:[],locations:[],scenes:[],visual_format:'science_atlas'}:{project_id:'p'};
  await h.bridge.processBridgeQueue({...h.options,batchStage:'scenes'});assert.equal(h.max,8);assert.equal(h.started.length,17);assert.ok(!h.started.includes('p0'));
